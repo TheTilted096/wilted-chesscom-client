@@ -5,7 +5,8 @@ import cors from 'cors';
 import puppeteer from 'puppeteer-core';
 import { Chess } from 'chess.js';
 import { UCIEngine } from './uci-engine.js';
-import { readFileSync } from 'fs';
+import { readFileSync, readdirSync, statSync } from 'fs';
+import { join, basename } from 'path';
 
 /**
  * API Server for chess.com move automation
@@ -47,8 +48,48 @@ let engineEnabled = false;
 let engineConfig = {
   nodes: config.engine?.nodes || 1000000,
   threads: config.engine?.threads || 1,
-  path: config.engine?.path || './engine'
+  selectedEngine: null // Currently selected engine name
 };
+
+const ENGINES_DIR = './engines';
+
+/**
+ * Discover available chess engines in the engines directory
+ */
+function discoverEngines() {
+  try {
+    const files = readdirSync(ENGINES_DIR);
+    const engines = [];
+
+    for (const file of files) {
+      const fullPath = join(ENGINES_DIR, file);
+      try {
+        const stats = statSync(fullPath);
+
+        // Check if it's a file and executable
+        if (stats.isFile() && file !== '.gitkeep') {
+          // On Unix, check if executable bit is set
+          const isExecutable = process.platform === 'win32' || (stats.mode & 0o111) !== 0;
+
+          engines.push({
+            name: file,
+            path: fullPath,
+            size: stats.size,
+            executable: isExecutable,
+            modified: stats.mtime
+          });
+        }
+      } catch (err) {
+        console.warn(`Could not stat ${fullPath}:`, err.message);
+      }
+    }
+
+    return engines;
+  } catch (error) {
+    console.warn('Could not read engines directory:', error.message);
+    return [];
+  }
+}
 
 /**
  * Connect to existing Edge instance
@@ -510,31 +551,91 @@ app.post('/disconnect', async (req, res) => {
  * Engine Control Endpoints
  */
 
+// List available engines
+app.get('/engine/list', (req, res) => {
+  const engines = discoverEngines();
+
+  res.json({
+    success: true,
+    engines,
+    count: engines.length,
+    enginesDir: ENGINES_DIR
+  });
+});
+
 // Enable engine
 app.post('/engine/enable', async (req, res) => {
   try {
+    const { engine: engineName } = req.body;
+
     if (engineEnabled && engine) {
       return res.json({
         success: true,
         message: 'Engine already enabled',
-        engineEnabled: true
+        engineEnabled: true,
+        selectedEngine: engineConfig.selectedEngine
       });
+    }
+
+    // If no engine specified, try to use the first available one
+    let enginePath;
+    let selectedEngineName;
+
+    if (engineName) {
+      // User specified an engine
+      const availableEngines = discoverEngines();
+      const selectedEngine = availableEngines.find(e => e.name === engineName);
+
+      if (!selectedEngine) {
+        return res.status(400).json({
+          success: false,
+          error: `Engine "${engineName}" not found. Use GET /engine/list to see available engines.`,
+          availableEngines: availableEngines.map(e => e.name)
+        });
+      }
+
+      if (!selectedEngine.executable) {
+        return res.status(400).json({
+          success: false,
+          error: `Engine "${engineName}" is not executable. Please make it executable: chmod +x engines/${engineName}`
+        });
+      }
+
+      enginePath = selectedEngine.path;
+      selectedEngineName = engineName;
+    } else {
+      // Auto-select first available engine
+      const availableEngines = discoverEngines();
+      const executableEngines = availableEngines.filter(e => e.executable);
+
+      if (executableEngines.length === 0) {
+        return res.status(400).json({
+          success: false,
+          error: 'No executable engines found in engines/ directory. Please add a UCI chess engine.',
+          availableEngines: availableEngines.map(e => e.name)
+        });
+      }
+
+      enginePath = executableEngines[0].path;
+      selectedEngineName = executableEngines[0].name;
     }
 
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     console.log('🤖 Starting chess engine...');
-    console.log(`   Path: ${engineConfig.path}`);
+    console.log(`   Engine: ${selectedEngineName}`);
+    console.log(`   Path: ${enginePath}`);
     console.log(`   Threads: ${engineConfig.threads}`);
     console.log(`   Node limit: ${engineConfig.nodes}`);
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 
     // Create and start engine
-    engine = new UCIEngine(engineConfig.path, {
+    engine = new UCIEngine(enginePath, {
       threads: engineConfig.threads
     });
 
     await engine.start();
     engineEnabled = true;
+    engineConfig.selectedEngine = selectedEngineName;
 
     console.log('✓ Engine enabled and ready');
 
@@ -542,16 +643,18 @@ app.post('/engine/enable', async (req, res) => {
       success: true,
       message: 'Engine enabled',
       engineEnabled: true,
+      selectedEngine: selectedEngineName,
       config: engineConfig
     });
   } catch (error) {
     console.error('❌ Failed to enable engine:', error.message);
     engineEnabled = false;
     engine = null;
+    engineConfig.selectedEngine = null;
     res.status(500).json({
       success: false,
       error: error.message,
-      message: 'Failed to start engine. Make sure the engine executable exists at the configured path.'
+      message: 'Failed to start engine. Make sure the engine executable exists and is compatible with UCI protocol.'
     });
   }
 });
@@ -569,16 +672,19 @@ app.post('/engine/disable', async (req, res) => {
 
     console.log('🤖 Stopping chess engine...');
 
+    const stoppedEngine = engineConfig.selectedEngine;
     await engine.quit();
     engine = null;
     engineEnabled = false;
+    engineConfig.selectedEngine = null;
 
     console.log('✓ Engine disabled');
 
     res.json({
       success: true,
       message: 'Engine disabled',
-      engineEnabled: false
+      engineEnabled: false,
+      stoppedEngine
     });
   } catch (error) {
     console.error('❌ Failed to disable engine:', error.message);
@@ -589,12 +695,92 @@ app.post('/engine/disable', async (req, res) => {
   }
 });
 
+// Switch to a different engine
+app.post('/engine/switch', async (req, res) => {
+  try {
+    const { engine: newEngineName } = req.body;
+
+    if (!newEngineName) {
+      return res.status(400).json({
+        success: false,
+        error: 'Engine name required. Provide { "engine": "engine-name" }'
+      });
+    }
+
+    // Check if the new engine exists
+    const availableEngines = discoverEngines();
+    const newEngine = availableEngines.find(e => e.name === newEngineName);
+
+    if (!newEngine) {
+      return res.status(400).json({
+        success: false,
+        error: `Engine "${newEngineName}" not found`,
+        availableEngines: availableEngines.map(e => e.name)
+      });
+    }
+
+    if (!newEngine.executable) {
+      return res.status(400).json({
+        success: false,
+        error: `Engine "${newEngineName}" is not executable. Please make it executable: chmod +x engines/${newEngineName}`
+      });
+    }
+
+    const previousEngine = engineConfig.selectedEngine;
+
+    // Stop current engine if running
+    if (engineEnabled && engine) {
+      console.log(`Stopping current engine: ${previousEngine}...`);
+      await engine.quit();
+      engine = null;
+      engineEnabled = false;
+    }
+
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    console.log('🔄 Switching chess engine...');
+    console.log(`   From: ${previousEngine || 'none'}`);
+    console.log(`   To: ${newEngineName}`);
+    console.log(`   Threads: ${engineConfig.threads}`);
+    console.log(`   Node limit: ${engineConfig.nodes}`);
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+
+    // Start new engine
+    engine = new UCIEngine(newEngine.path, {
+      threads: engineConfig.threads
+    });
+
+    await engine.start();
+    engineEnabled = true;
+    engineConfig.selectedEngine = newEngineName;
+
+    console.log('✓ Engine switch completed');
+
+    res.json({
+      success: true,
+      message: 'Engine switched successfully',
+      previousEngine: previousEngine || 'none',
+      currentEngine: newEngineName,
+      engineEnabled: true,
+      config: engineConfig
+    });
+  } catch (error) {
+    console.error('❌ Failed to switch engine:', error.message);
+    engineEnabled = false;
+    engine = null;
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
 // Configure engine
 app.post('/engine/config', async (req, res) => {
   try {
-    const { nodes, threads, path } = req.body;
+    const { nodes, threads } = req.body;
 
     const wasEnabled = engineEnabled;
+    const currentEngine = engineConfig.selectedEngine;
 
     // If engine is running, stop it first
     if (engineEnabled && engine) {
@@ -613,26 +799,37 @@ app.post('/engine/config', async (req, res) => {
       engineConfig.threads = parseInt(threads);
       console.log(`✓ Threads updated: ${engineConfig.threads}`);
     }
-    if (path !== undefined) {
-      engineConfig.path = path;
-      console.log(`✓ Engine path updated: ${engineConfig.path}`);
-    }
 
     // Restart engine if it was running
-    if (wasEnabled) {
+    if (wasEnabled && currentEngine) {
       console.log('Restarting engine with new configuration...');
-      engine = new UCIEngine(engineConfig.path, {
+      const availableEngines = discoverEngines();
+      const engineInfo = availableEngines.find(e => e.name === currentEngine);
+
+      if (!engineInfo) {
+        return res.status(400).json({
+          success: false,
+          error: `Previously selected engine "${currentEngine}" no longer available`
+        });
+      }
+
+      engine = new UCIEngine(engineInfo.path, {
         threads: engineConfig.threads
       });
       await engine.start();
       engineEnabled = true;
+      engineConfig.selectedEngine = currentEngine;
       console.log('✓ Engine restarted with new configuration');
     }
 
     res.json({
       success: true,
       message: 'Engine configuration updated',
-      config: engineConfig,
+      config: {
+        nodes: engineConfig.nodes,
+        threads: engineConfig.threads,
+        selectedEngine: engineConfig.selectedEngine
+      },
       engineEnabled
     });
   } catch (error) {
@@ -646,11 +843,22 @@ app.post('/engine/config', async (req, res) => {
 
 // Get engine status
 app.get('/engine/status', (req, res) => {
+  const availableEngines = discoverEngines();
+
   res.json({
     engineEnabled,
     engineReady: engine ? engine.isReady() : false,
     thinking: engine ? engine.thinking : false,
-    config: engineConfig
+    selectedEngine: engineConfig.selectedEngine,
+    config: {
+      nodes: engineConfig.nodes,
+      threads: engineConfig.threads
+    },
+    availableEngines: availableEngines.map(e => ({
+      name: e.name,
+      executable: e.executable,
+      size: e.size
+    }))
   });
 });
 
@@ -754,14 +962,18 @@ async function start() {
       console.log('         Returns connection and game status');
       console.log('');
       console.log('  ENGINE CONTROL:');
+      console.log(`    GET  http://localhost:${PORT}/engine/list`);
+      console.log('         List all available engines in engines/ folder');
       console.log(`    POST http://localhost:${PORT}/engine/enable`);
-      console.log('         Enable chess engine');
+      console.log('         Body: { "engine": "engine-name" } (optional, auto-selects first)');
       console.log(`    POST http://localhost:${PORT}/engine/disable`);
       console.log('         Disable chess engine');
+      console.log(`    POST http://localhost:${PORT}/engine/switch`);
+      console.log('         Body: { "engine": "engine-name" }');
       console.log(`    POST http://localhost:${PORT}/engine/config`);
       console.log('         Body: { "nodes": 1000000, "threads": 1 }');
       console.log(`    GET  http://localhost:${PORT}/engine/status`);
-      console.log('         Returns engine status and configuration');
+      console.log('         Returns engine status and available engines');
       console.log(`    GET  http://localhost:${PORT}/engine/suggest`);
       console.log('         Get engine move suggestion for current position');
       console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');

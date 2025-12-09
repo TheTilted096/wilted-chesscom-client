@@ -1,0 +1,16 @@
+# Place your UCI chess engine executables in this directory
+#
+# Supported engines:
+# - Stockfish
+# - Komodo
+# - Leela Chess Zero
+# - Wilted
+# - Any UCI-compatible chess engine
+#
+# Example:
+#   engines/
+#   ├── stockfish
+#   ├── wilted
+#   └── lc0
+#
+# The API will automatically discover all executable files in this directory.
