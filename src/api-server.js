@@ -41,10 +41,17 @@ let page = null;
 let connected = false;
 let gameActive = false;
 let chess = new Chess();
+let moveHistory = []; // Track moves in UCI format (e2e4, e7e5, etc.)
 
 // Engine state
 let engine = null;
 let engineEnabled = false;
+
+// Autoplay state
+let autoplayEnabled = false;
+let autoplayColor = 'white'; // 'white' or 'black'
+let autoplayInterval = null;
+let autoplayBusy = false; // Prevent concurrent autoplay actions
 let engineConfig = {
   nodes: config.engine?.nodes || 1000000,
   threads: config.engine?.threads || 1,
@@ -148,6 +155,283 @@ async function checkGameStatus() {
     console.error('Error checking game status:', error.message);
     return false;
   }
+}
+
+/**
+ * Detect whose turn it is
+ * Returns 'white', 'black', or null if unable to determine
+ */
+async function detectTurn() {
+  if (!page) return null;
+
+  try {
+    const turnInfo = await page.evaluate(() => {
+      // Method 1: Check for highlighted squares or move indicators
+      const board = document.querySelector('.board');
+      if (!board) return { method: 'none', turn: null };
+
+      // Method 2: Look for turn indicator text
+      const turnText = document.querySelector('.turn-indicator, .player-turn, [class*="turn"]');
+      if (turnText && turnText.textContent) {
+        const text = turnText.textContent.toLowerCase();
+        if (text.includes('white') || text.includes('you') && !board.classList.contains('flipped')) {
+          return { method: 'text', turn: 'white' };
+        }
+        if (text.includes('black') || text.includes('you') && board.classList.contains('flipped')) {
+          return { method: 'text', turn: 'black' };
+        }
+      }
+
+      // Method 3: Check if board is flipped and look for active player
+      const isFlipped = board.classList.contains('flipped');
+
+      // Method 4: Look for clock that's ticking or highlighted player
+      const whiteClock = document.querySelector('.clock-white, [class*="clock"][class*="white"], .player-component.player-bottom .clock, .clock.player-bottom');
+      const blackClock = document.querySelector('.clock-black, [class*="clock"][class*="black"], .player-component.player-top .clock, .clock.player-top');
+
+      // Active clock might have a specific class
+      if (whiteClock?.classList.contains('clock-active') || whiteClock?.classList.contains('running')) {
+        return { method: 'clock', turn: 'white' };
+      }
+      if (blackClock?.classList.contains('clock-active') || blackClock?.classList.contains('running')) {
+        return { method: 'clock', turn: 'black' };
+      }
+
+      // Return board flip status as fallback info
+      return { method: 'flip', turn: null, isFlipped };
+    });
+
+    // If we couldn't detect from DOM, use move history
+    if (!turnInfo.turn) {
+      // Even number of moves = white's turn, odd = black's turn
+      const turn = moveHistory.length % 2 === 0 ? 'white' : 'black';
+      return turn;
+    }
+
+    return turnInfo.turn;
+  } catch (error) {
+    console.error('Error detecting turn:', error.message);
+    // Fallback to move history
+    return moveHistory.length % 2 === 0 ? 'white' : 'black';
+  }
+}
+
+/**
+ * Check if it's our turn based on autoplay color setting
+ */
+async function isOurTurn() {
+  const currentTurn = await detectTurn();
+  return currentTurn === autoplayColor;
+}
+
+/**
+ * Internal function to sync position with board (detect opponent moves)
+ * Returns object with sync details: { synced, positionsMatch, detectedMove, currentFen, expectedFen }
+ */
+async function syncPositionInternal() {
+  if (!connected || !page) {
+    return { synced: false, error: 'Not connected' };
+  }
+
+  try {
+    // Get current board state from browser
+    const currentFen = await getBoardState();
+    if (!currentFen) {
+      return { synced: false, error: 'Could not read board state' };
+    }
+
+    // Get expected position from move history
+    const expectedChess = new Chess();
+    for (const move of moveHistory) {
+      const from = move.substring(0, 2);
+      const to = move.substring(2, 4);
+      const promotion = move.length > 4 ? move[4] : undefined;
+      try {
+        expectedChess.move({ from, to, promotion });
+      } catch (err) {
+        console.error(`   ✗ Invalid move in history: ${move}`);
+      }
+    }
+
+    const expectedFen = expectedChess.fen();
+
+    // Compare positions (only the board part, ignore turn/castling/etc)
+    const currentBoard = currentFen.split(' ')[0];
+    const expectedBoard = expectedFen.split(' ')[0];
+
+    if (currentBoard === expectedBoard) {
+      // Positions match - no opponent move detected
+      return {
+        synced: true,
+        positionsMatch: true,
+        currentFen,
+        expectedFen
+      };
+    }
+
+    // Positions don't match - try to find the move
+    const possibleMoves = expectedChess.moves({ verbose: true });
+    let detectedMove = null;
+
+    for (const move of possibleMoves) {
+      const testChess = new Chess(expectedFen);
+      testChess.move(move);
+      const testBoard = testChess.fen().split(' ')[0];
+
+      if (testBoard === currentBoard) {
+        // Found the move!
+        detectedMove = move.from + move.to + (move.promotion || '');
+        break;
+      }
+    }
+
+    if (detectedMove) {
+      console.log(`   🔄 Detected opponent move: ${detectedMove}`);
+      moveHistory.push(detectedMove);
+
+      // Update chess instance
+      chess.load(currentFen);
+
+      return {
+        synced: true,
+        positionsMatch: false,
+        detectedMove,
+        currentFen,
+        expectedFen
+      };
+    }
+
+    // Could not sync
+    console.warn('   ⚠ Could not sync position - positions too different');
+    return {
+      synced: false,
+      error: 'Could not detect opponent move - positions too different',
+      currentFen,
+      expectedFen
+    };
+  } catch (error) {
+    console.error('Error syncing position:', error.message);
+    return {
+      synced: false,
+      error: error.message
+    };
+  }
+}
+
+/**
+ * Autoplay loop - checks if it's our turn and plays engine move
+ */
+async function autoplayLoop() {
+  // Skip if already processing
+  if (autoplayBusy) {
+    return;
+  }
+
+  try {
+    autoplayBusy = true;
+
+    // Check if game is still active
+    const isActive = await checkGameStatus();
+    if (!isActive) {
+      console.log('⏸️  Game ended - autoplay paused');
+      return;
+    }
+
+    // SYNC POSITION FIRST - detect opponent moves
+    await syncPositionInternal();
+
+    // Check if it's our turn
+    const ourTurn = await isOurTurn();
+    const currentTurn = await detectTurn();
+
+    if (!ourTurn) {
+      // Not our turn, just wait
+      return;
+    }
+
+    console.log('');
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    console.log('🤖 AUTOPLAY - It\'s our turn!');
+    console.log(`   Playing as: ${autoplayColor}`);
+    console.log(`   Current turn: ${currentTurn}`);
+    console.log(`   Move history: ${moveHistory.join(' ')}`);
+
+    // Check if engine is ready
+    if (!engineEnabled || !engine || !engine.isReady()) {
+      console.log('❌ Engine not enabled or not ready');
+      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      return;
+    }
+
+    // Set position for engine
+    console.log('   Setting position...');
+    engine.setPosition('startpos', moveHistory);
+
+    // Get best move
+    console.log(`   Calculating (${engineConfig.nodes} nodes)...`);
+    const result = await engine.goNodes(engineConfig.nodes);
+    const bestMove = result.move;
+
+    console.log(`   ✓ Engine suggests: ${bestMove}`);
+
+    // Execute the move
+    console.log('   Executing move on board...');
+    await executeMove(bestMove);
+
+    // Track the move
+    moveHistory.push(bestMove);
+    console.log(`   ✓ Move completed! Total moves: ${moveHistory.length}`);
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    console.log('');
+
+  } catch (error) {
+    console.error('❌ Autoplay error:', error.message);
+  } finally {
+    autoplayBusy = false;
+  }
+}
+
+/**
+ * Start autoplay monitoring
+ */
+function startAutoplay() {
+  if (autoplayInterval) {
+    clearInterval(autoplayInterval);
+  }
+
+  console.log('');
+  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  console.log('🤖 AUTOPLAY ENABLED');
+  console.log(`   Playing as: ${autoplayColor}`);
+  console.log(`   Checking every 2 seconds...`);
+  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  console.log('');
+
+  autoplayEnabled = true;
+
+  // Check every 2 seconds
+  autoplayInterval = setInterval(autoplayLoop, 2000);
+
+  // Run immediately
+  autoplayLoop();
+}
+
+/**
+ * Stop autoplay monitoring
+ */
+function stopAutoplay() {
+  if (autoplayInterval) {
+    clearInterval(autoplayInterval);
+    autoplayInterval = null;
+  }
+
+  autoplayEnabled = false;
+
+  console.log('');
+  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  console.log('⏹️  AUTOPLAY DISABLED');
+  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  console.log('');
 }
 
 /**
@@ -416,9 +700,214 @@ app.get('/board', async (req, res) => {
     res.json({
       fen,
       gameActive: active,
+      moveHistory,
+      moveCount: moveHistory.length,
       timestamp: new Date().toISOString()
     });
   } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Reset move history (for new games)
+app.post('/reset', async (req, res) => {
+  try {
+    const previousMoveCount = moveHistory.length;
+    moveHistory = [];
+    chess.reset();
+
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    console.log('🔄 Position reset');
+    console.log(`   Cleared ${previousMoveCount} moves from history`);
+
+    // Send ucinewgame to engine if it's enabled
+    if (engineEnabled && engine && engine.isReady()) {
+      console.log('   Sending ucinewgame to engine...');
+      await engine.newGame();
+      console.log('   ✓ Engine reset for new game');
+    }
+
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+
+    res.json({
+      success: true,
+      message: 'Move history reset',
+      previousMoveCount,
+      engineReset: engineEnabled && engine && engine.isReady(),
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Set move history manually
+app.post('/position', async (req, res) => {
+  try {
+    const { moves } = req.body;
+
+    if (!Array.isArray(moves)) {
+      return res.status(400).json({
+        error: 'Moves must be an array of UCI moves (e.g., ["e2e4", "e7e5"])'
+      });
+    }
+
+    // Validate each move is in UCI format
+    const uciPattern = /^[a-h][1-8][a-h][1-8][qrbn]?$/;
+    const invalidMoves = moves.filter(m => !uciPattern.test(m));
+
+    if (invalidMoves.length > 0) {
+      return res.status(400).json({
+        error: 'Invalid UCI move format',
+        invalidMoves
+      });
+    }
+
+    moveHistory = [...moves];
+
+    // Update chess.js instance to match
+    chess.reset();
+    for (const move of moveHistory) {
+      const from = move.substring(0, 2);
+      const to = move.substring(2, 4);
+      const promotion = move.length > 4 ? move[4] : undefined;
+      chess.move({ from, to, promotion });
+    }
+
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    console.log('📍 Position set manually');
+    console.log(`   Moves: ${moveHistory.join(' ')}`);
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+
+    res.json({
+      success: true,
+      message: 'Position set',
+      moveHistory,
+      moveCount: moveHistory.length,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Enable autoplay
+app.post('/autoplay/enable', async (req, res) => {
+  try {
+    const { color } = req.body;
+
+    if (!connected) {
+      return res.status(400).json({ error: 'Not connected to browser' });
+    }
+
+    if (!engineEnabled || !engine || !engine.isReady()) {
+      return res.status(400).json({ error: 'Engine not enabled. Use /engine/enable first' });
+    }
+
+    // Validate color
+    if (color && color !== 'white' && color !== 'black') {
+      return res.status(400).json({ error: 'Color must be "white" or "black"' });
+    }
+
+    // Set color (default to white)
+    if (color) {
+      autoplayColor = color;
+    }
+
+    // Start autoplay
+    startAutoplay();
+
+    res.json({
+      success: true,
+      message: 'Autoplay enabled',
+      color: autoplayColor,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Disable autoplay
+app.post('/autoplay/disable', async (req, res) => {
+  try {
+    stopAutoplay();
+
+    res.json({
+      success: true,
+      message: 'Autoplay disabled',
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get autoplay status
+app.get('/autoplay/status', async (req, res) => {
+  try {
+    const currentTurn = await detectTurn();
+    const ourTurn = await isOurTurn();
+
+    res.json({
+      enabled: autoplayEnabled,
+      color: autoplayColor,
+      busy: autoplayBusy,
+      currentTurn,
+      ourTurn,
+      gameActive,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Sync position with board (detect opponent moves)
+app.post('/sync', async (req, res) => {
+  try {
+    if (!connected) {
+      return res.status(400).json({ error: 'Not connected to browser' });
+    }
+
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    console.log('🔄 Syncing position with board...');
+
+    const result = await syncPositionInternal();
+
+    if (result.synced) {
+      if (result.positionsMatch) {
+        console.log('   ✓ Positions match - no opponent move detected');
+      } else {
+        console.log(`   ✓ Detected opponent move: ${result.detectedMove}`);
+        console.log(`   ✓ Move history updated (${moveHistory.length} moves)`);
+      }
+      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+
+      res.json({
+        success: true,
+        synced: true,
+        positionsMatch: result.positionsMatch,
+        detectedMove: result.detectedMove,
+        moveHistory,
+        moveCount: moveHistory.length
+      });
+    } else {
+      console.log('   ✗ Could not determine opponent move');
+      console.log('   → You may need to manually set the position');
+      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+
+      res.json({
+        success: false,
+        synced: false,
+        error: result.error,
+        currentFen: result.currentFen,
+        expectedFen: result.expectedFen,
+        suggestion: 'Use POST /position to manually set the move history'
+      });
+    }
+  } catch (error) {
+    console.error('❌ Error syncing position:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -457,10 +946,15 @@ app.post('/move', async (req, res) => {
     const result = await executeMove(move);
     console.log('✓ Move execution completed:', result);
 
+    // Track the move in history for engine
+    moveHistory.push(move);
+    console.log('✓ Move added to history. Total moves:', moveHistory.length);
+
     res.json({
       success: true,
       move,
       result,
+      moveHistory: moveHistory.length,
       timestamp: new Date().toISOString()
     });
   } catch (error) {
@@ -889,13 +1383,10 @@ app.get('/engine/suggest', async (req, res) => {
     }
 
     console.log(`   Position: ${fen}`);
+    console.log(`   Move history (${moveHistory.length} moves):`, moveHistory.join(' '));
 
-    // Set position for engine
-    chess.load(fen);
-    const moves = chess.history();
-
-    // Set position
-    engine.setPosition('startpos', moves);
+    // Set position for engine using move history
+    engine.setPosition('startpos', moveHistory);
 
     // Get best move using node limit
     console.log(`   Searching with ${engineConfig.nodes} nodes...`);
@@ -909,6 +1400,7 @@ app.get('/engine/suggest', async (req, res) => {
       move: result.move,
       ponder: result.ponder,
       fen,
+      moveHistory,
       nodes: engineConfig.nodes,
       timestamp: new Date().toISOString()
     });
@@ -957,9 +1449,15 @@ async function start() {
       console.log(`    POST http://localhost:${PORT}/move`);
       console.log('         Body: { "move": "e2e4" }');
       console.log(`    GET  http://localhost:${PORT}/board`);
-      console.log('         Returns current FEN position');
+      console.log('         Returns current FEN position and move history');
       console.log(`    GET  http://localhost:${PORT}/status`);
       console.log('         Returns connection and game status');
+      console.log(`    POST http://localhost:${PORT}/sync`);
+      console.log('         Detect opponent moves and sync position');
+      console.log(`    POST http://localhost:${PORT}/reset`);
+      console.log('         Reset move history (for new games)');
+      console.log(`    POST http://localhost:${PORT}/position`);
+      console.log('         Body: { "moves": ["e2e4", "e7e5"] }');
       console.log('');
       console.log('  ENGINE CONTROL:');
       console.log(`    GET  http://localhost:${PORT}/engine/list`);
@@ -976,6 +1474,15 @@ async function start() {
       console.log('         Returns engine status and available engines');
       console.log(`    GET  http://localhost:${PORT}/engine/suggest`);
       console.log('         Get engine move suggestion for current position');
+      console.log('');
+      console.log('  AUTOPLAY (Automatic Engine Play):');
+      console.log(`    POST http://localhost:${PORT}/autoplay/enable`);
+      console.log('         Body: { "color": "white" } or { "color": "black" }');
+      console.log('         Automatically plays moves when it\'s your turn');
+      console.log(`    POST http://localhost:${PORT}/autoplay/disable`);
+      console.log('         Stop autoplay');
+      console.log(`    GET  http://localhost:${PORT}/autoplay/status`);
+      console.log('         Returns autoplay status and current turn info');
       console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
       console.log('');
     }
@@ -984,11 +1491,22 @@ async function start() {
   // Handle shutdown
   process.on('SIGINT', async () => {
     console.log('\n\nShutting down...');
+
+    // Stop autoplay if running
+    if (autoplayEnabled) {
+      console.log('Stopping autoplay...');
+      stopAutoplay();
+    }
+
+    // Stop engine if running
     if (engine) {
       console.log('Stopping engine...');
       await engine.quit();
     }
+
+    // Disconnect browser
     if (browser) await browser.disconnect();
+
     process.exit(0);
   });
 }
