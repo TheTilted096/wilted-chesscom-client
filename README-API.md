@@ -183,7 +183,163 @@ Simple health check.
 }
 ```
 
-## Integrating with Your Engine
+## Built-in Chess Engine Integration
+
+The API server now includes built-in support for UCI chess engines! You can enable/disable the engine and configure node limits directly via the API.
+
+### Configuration
+
+Edit `config-api.json` to set your engine path and default settings:
+
+```json
+{
+  "engine": {
+    "path": "./engine",
+    "threads": 1,
+    "nodes": 1000000
+  }
+}
+```
+
+- `path`: Path to your UCI chess engine executable
+- `threads`: Number of CPU threads for the engine to use
+- `nodes`: Default node limit for engine searches (higher = stronger but slower)
+
+### POST /engine/enable
+Start the chess engine.
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Engine enabled",
+  "engineEnabled": true,
+  "config": {
+    "path": "./engine",
+    "threads": 1,
+    "nodes": 1000000
+  }
+}
+```
+
+### POST /engine/disable
+Stop the chess engine.
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Engine disabled",
+  "engineEnabled": false
+}
+```
+
+### POST /engine/config
+Update engine configuration. The engine will be restarted with new settings if it's currently running.
+
+**Request:**
+```json
+{
+  "nodes": 2000000,
+  "threads": 4,
+  "path": "./stockfish"
+}
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Engine configuration updated",
+  "config": {
+    "path": "./stockfish",
+    "threads": 4,
+    "nodes": 2000000
+  },
+  "engineEnabled": true
+}
+```
+
+### GET /engine/status
+Get current engine status and configuration.
+
+**Response:**
+```json
+{
+  "engineEnabled": true,
+  "engineReady": true,
+  "thinking": false,
+  "config": {
+    "path": "./engine",
+    "threads": 1,
+    "nodes": 1000000
+  }
+}
+```
+
+### GET /engine/suggest
+Get the engine's suggested move for the current board position.
+
+**Response:**
+```json
+{
+  "success": true,
+  "move": "e2e4",
+  "ponder": "e7e5",
+  "fen": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+  "nodes": 1000000,
+  "timestamp": "2024-01-15T10:30:00.000Z"
+}
+```
+
+- `move`: Best move in UCI format
+- `ponder`: Suggested move to ponder on (opponent's expected response)
+- `fen`: Current board position
+- `nodes`: Number of nodes searched
+
+### Example: Engine-Assisted Play
+
+```bash
+# 1. Start the engine
+curl -X POST http://localhost:3000/engine/enable
+
+# 2. Get engine's suggested move
+curl http://localhost:3000/engine/suggest
+# Returns: {"move": "e2e4", ...}
+
+# 3. Execute the move
+curl -X POST http://localhost:3000/move \
+  -H "Content-Type: application/json" \
+  -d '{"move": "e2e4"}'
+
+# 4. Configure engine for deeper search
+curl -X POST http://localhost:3000/engine/config \
+  -H "Content-Type: application/json" \
+  -d '{"nodes": 5000000, "threads": 8}'
+
+# 5. Get next suggestion with new settings
+curl http://localhost:3000/engine/suggest
+```
+
+### UCI Engine Requirements
+
+Your chess engine must support the Universal Chess Interface (UCI) protocol. Popular UCI engines include:
+
+- **Stockfish** - World's strongest open-source engine
+- **Komodo** - Strong commercial engine
+- **Leela Chess Zero** - Neural network-based engine
+- **Custom engines** - Any engine following UCI protocol
+
+The engine executable should respond to standard UCI commands:
+- `uci` - Initialize UCI mode
+- `isready` - Check if ready
+- `position` - Set board position
+- `go nodes X` - Search with node limit
+- `quit` - Shut down
+
+For reference on UCI protocol, see: https://gist.github.com/DOBRO/2592c6dad754ba67e6dcaec8c90165bf
+
+## Integrating with Your Engine (Advanced)
 
 Create a simple bridge script that:
 1. Starts your UCI engine

@@ -238,6 +238,46 @@ export class UCIEngine extends EventEmitter {
   }
 
   /**
+   * Get best move with node limit
+   * @param {number} nodes - Number of nodes to search
+   * @returns {Promise<{move: string, ponder: string}>}
+   */
+  async goNodes(nodes) {
+    return new Promise((resolve, reject) => {
+      this.thinking = true;
+
+      console.log(`Engine thinking (nodes: ${nodes})...`);
+
+      // Listen for bestmove
+      const onBestMove = (line) => {
+        if (line.startsWith('bestmove')) {
+          this.thinking = false;
+
+          const parts = line.split(' ');
+          const move = parts[1];
+          const ponder = parts[3];
+
+          console.log(`✓ Engine suggests: ${move}`);
+
+          resolve({ move, ponder });
+        }
+      };
+
+      this.once('bestmove', onBestMove);
+      this.send(`go nodes ${nodes}`);
+
+      // Set timeout (generous timeout for node-limited search)
+      const timeout = setTimeout(() => {
+        this.removeListener('bestmove', onBestMove);
+        this.thinking = false;
+        reject(new Error('Timeout waiting for engine move'));
+      }, 300000); // 5 minutes max
+
+      this.once('bestmove', () => clearTimeout(timeout));
+    });
+  }
+
+  /**
    * Stop engine calculation
    */
   stop() {

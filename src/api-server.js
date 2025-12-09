@@ -4,6 +4,8 @@ import express from 'express';
 import cors from 'cors';
 import puppeteer from 'puppeteer-core';
 import { Chess } from 'chess.js';
+import { UCIEngine } from './uci-engine.js';
+import { readFileSync } from 'fs';
 
 /**
  * API Server for chess.com move automation
@@ -12,6 +14,21 @@ import { Chess } from 'chess.js';
 
 const app = express();
 const PORT = 3000;
+
+// Load configuration
+let config = {};
+try {
+  config = JSON.parse(readFileSync('./config-api.json', 'utf8'));
+} catch (error) {
+  console.warn('Warning: Could not load config-api.json, using defaults');
+  config = {
+    engine: {
+      path: './engine',
+      threads: 1,
+      nodes: 1000000
+    }
+  };
+}
 
 // Middleware
 app.use(cors());
@@ -23,6 +40,15 @@ let page = null;
 let connected = false;
 let gameActive = false;
 let chess = new Chess();
+
+// Engine state
+let engine = null;
+let engineEnabled = false;
+let engineConfig = {
+  nodes: config.engine?.nodes || 1000000,
+  threads: config.engine?.threads || 1,
+  path: config.engine?.path || './engine'
+};
 
 /**
  * Connect to existing Edge instance
@@ -481,6 +507,213 @@ app.post('/disconnect', async (req, res) => {
 });
 
 /**
+ * Engine Control Endpoints
+ */
+
+// Enable engine
+app.post('/engine/enable', async (req, res) => {
+  try {
+    if (engineEnabled && engine) {
+      return res.json({
+        success: true,
+        message: 'Engine already enabled',
+        engineEnabled: true
+      });
+    }
+
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    console.log('🤖 Starting chess engine...');
+    console.log(`   Path: ${engineConfig.path}`);
+    console.log(`   Threads: ${engineConfig.threads}`);
+    console.log(`   Node limit: ${engineConfig.nodes}`);
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+
+    // Create and start engine
+    engine = new UCIEngine(engineConfig.path, {
+      threads: engineConfig.threads
+    });
+
+    await engine.start();
+    engineEnabled = true;
+
+    console.log('✓ Engine enabled and ready');
+
+    res.json({
+      success: true,
+      message: 'Engine enabled',
+      engineEnabled: true,
+      config: engineConfig
+    });
+  } catch (error) {
+    console.error('❌ Failed to enable engine:', error.message);
+    engineEnabled = false;
+    engine = null;
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      message: 'Failed to start engine. Make sure the engine executable exists at the configured path.'
+    });
+  }
+});
+
+// Disable engine
+app.post('/engine/disable', async (req, res) => {
+  try {
+    if (!engineEnabled || !engine) {
+      return res.json({
+        success: true,
+        message: 'Engine already disabled',
+        engineEnabled: false
+      });
+    }
+
+    console.log('🤖 Stopping chess engine...');
+
+    await engine.quit();
+    engine = null;
+    engineEnabled = false;
+
+    console.log('✓ Engine disabled');
+
+    res.json({
+      success: true,
+      message: 'Engine disabled',
+      engineEnabled: false
+    });
+  } catch (error) {
+    console.error('❌ Failed to disable engine:', error.message);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// Configure engine
+app.post('/engine/config', async (req, res) => {
+  try {
+    const { nodes, threads, path } = req.body;
+
+    const wasEnabled = engineEnabled;
+
+    // If engine is running, stop it first
+    if (engineEnabled && engine) {
+      console.log('Stopping engine to apply new configuration...');
+      await engine.quit();
+      engine = null;
+      engineEnabled = false;
+    }
+
+    // Update configuration
+    if (nodes !== undefined) {
+      engineConfig.nodes = parseInt(nodes);
+      console.log(`✓ Node limit updated: ${engineConfig.nodes}`);
+    }
+    if (threads !== undefined) {
+      engineConfig.threads = parseInt(threads);
+      console.log(`✓ Threads updated: ${engineConfig.threads}`);
+    }
+    if (path !== undefined) {
+      engineConfig.path = path;
+      console.log(`✓ Engine path updated: ${engineConfig.path}`);
+    }
+
+    // Restart engine if it was running
+    if (wasEnabled) {
+      console.log('Restarting engine with new configuration...');
+      engine = new UCIEngine(engineConfig.path, {
+        threads: engineConfig.threads
+      });
+      await engine.start();
+      engineEnabled = true;
+      console.log('✓ Engine restarted with new configuration');
+    }
+
+    res.json({
+      success: true,
+      message: 'Engine configuration updated',
+      config: engineConfig,
+      engineEnabled
+    });
+  } catch (error) {
+    console.error('❌ Failed to configure engine:', error.message);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// Get engine status
+app.get('/engine/status', (req, res) => {
+  res.json({
+    engineEnabled,
+    engineReady: engine ? engine.isReady() : false,
+    thinking: engine ? engine.thinking : false,
+    config: engineConfig
+  });
+});
+
+// Get engine move suggestion
+app.get('/engine/suggest', async (req, res) => {
+  try {
+    if (!engineEnabled || !engine) {
+      return res.status(400).json({
+        error: 'Engine not enabled. Call POST /engine/enable first.'
+      });
+    }
+
+    if (!connected) {
+      return res.status(400).json({
+        error: 'Not connected to browser'
+      });
+    }
+
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    console.log('🤖 Getting engine suggestion...');
+
+    // Get current board state
+    const fen = await getBoardState();
+    if (!fen) {
+      return res.status(400).json({
+        error: 'Could not read board state'
+      });
+    }
+
+    console.log(`   Position: ${fen}`);
+
+    // Set position for engine
+    chess.load(fen);
+    const moves = chess.history();
+
+    // Set position
+    engine.setPosition('startpos', moves);
+
+    // Get best move using node limit
+    console.log(`   Searching with ${engineConfig.nodes} nodes...`);
+    const result = await engine.goNodes(engineConfig.nodes);
+
+    console.log(`✓ Engine suggests: ${result.move}`);
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+
+    res.json({
+      success: true,
+      move: result.move,
+      ponder: result.ponder,
+      fen,
+      nodes: engineConfig.nodes,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error('❌ Error getting engine suggestion:', error.message);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+/**
  * Start server
  */
 async function start() {
@@ -512,14 +745,25 @@ async function start() {
       console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
       console.log('✓ Ready! API Endpoints:');
       console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-      console.log(`  POST http://localhost:${PORT}/move`);
-      console.log('       Body: { "move": "e2e4" }');
+      console.log('  BROWSER CONTROL:');
+      console.log(`    POST http://localhost:${PORT}/move`);
+      console.log('         Body: { "move": "e2e4" }');
+      console.log(`    GET  http://localhost:${PORT}/board`);
+      console.log('         Returns current FEN position');
+      console.log(`    GET  http://localhost:${PORT}/status`);
+      console.log('         Returns connection and game status');
       console.log('');
-      console.log(`  GET  http://localhost:${PORT}/board`);
-      console.log('       Returns current FEN position');
-      console.log('');
-      console.log(`  GET  http://localhost:${PORT}/status`);
-      console.log('       Returns connection and game status');
+      console.log('  ENGINE CONTROL:');
+      console.log(`    POST http://localhost:${PORT}/engine/enable`);
+      console.log('         Enable chess engine');
+      console.log(`    POST http://localhost:${PORT}/engine/disable`);
+      console.log('         Disable chess engine');
+      console.log(`    POST http://localhost:${PORT}/engine/config`);
+      console.log('         Body: { "nodes": 1000000, "threads": 1 }');
+      console.log(`    GET  http://localhost:${PORT}/engine/status`);
+      console.log('         Returns engine status and configuration');
+      console.log(`    GET  http://localhost:${PORT}/engine/suggest`);
+      console.log('         Get engine move suggestion for current position');
       console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
       console.log('');
     }
@@ -528,6 +772,10 @@ async function start() {
   // Handle shutdown
   process.on('SIGINT', async () => {
     console.log('\n\nShutting down...');
+    if (engine) {
+      console.log('Stopping engine...');
+      await engine.quit();
+    }
     if (browser) await browser.disconnect();
     process.exit(0);
   });
