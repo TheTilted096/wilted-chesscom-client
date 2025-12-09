@@ -323,6 +323,26 @@ async function setPosition(movesString) {
   }
 }
 
+async function extractMoves() {
+  try {
+    console.log('\n🔍 Extracting move history from chess.com...');
+    const result = await apiRequest('GET', '/extract-moves');
+
+    if (result.success) {
+      console.log(`✓ Extracted ${result.moveCount} moves`);
+      console.log(`   Moves: ${result.movesString}`);
+    } else {
+      console.log('⚠️  Could not extract moves');
+      console.log(`   ${result.message}`);
+      if (result.suggestion) {
+        console.log(`\n💡 ${result.suggestion}`);
+      }
+    }
+  } catch (error) {
+    console.log('❌ Error:', error.message);
+  }
+}
+
 async function main() {
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
   console.log('  Chess.com API - Manual Test Client');
@@ -348,6 +368,7 @@ async function main() {
   console.log('    board          - Show current board state');
   console.log('    status         - Check connection status');
   console.log('    sync           - Detect opponent moves and sync position');
+  console.log('    extract        - Extract move history from chess.com (debug)');
   console.log('    reset          - Reset move history (new game)');
   console.log('    position <moves> - Set position (e.g., position e2e4 e7e5)');
   console.log('');
@@ -395,6 +416,7 @@ async function main() {
         console.log('    board          - Show current board state');
         console.log('    status         - Check connection status');
         console.log('    sync           - Detect opponent moves and sync position');
+        console.log('    extract        - Extract move history from chess.com (debug)');
         console.log('    reset          - Reset move history (new game)');
         console.log('    position <moves> - Set position (e.g., position e2e4 e7e5)');
         console.log('');
@@ -423,6 +445,8 @@ async function main() {
         await checkStatus();
       } else if (command === 'sync') {
         await syncPosition();
+      } else if (command === 'extract') {
+        await extractMoves();
       } else if (command === 'reset') {
         await resetPosition();
       } else if (command === 'position') {

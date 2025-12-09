@@ -223,6 +223,175 @@ async function isOurTurn() {
 }
 
 /**
+ * Convert SAN move to UCI format
+ * e.g., "e4" -> "e2e4", "Nf3" -> "g1f3"
+ */
+function sanToUci(sanMove, position) {
+  try {
+    const testChess = new Chess(position);
+    const move = testChess.move(sanMove);
+
+    if (!move) {
+      return null;
+    }
+
+    return move.from + move.to + (move.promotion || '');
+  } catch (err) {
+    return null;
+  }
+}
+
+/**
+ * Extract move history from chess.com's game state
+ * Returns array of moves in UCI format, or null if not found
+ */
+async function extractMoveHistoryFromChessCom() {
+  if (!page) return null;
+
+  try {
+    const moveData = await page.evaluate(() => {
+      // Try to extract moves from chess.com's internal game state
+      try {
+        const debug = {
+          windowKeys: Object.keys(window).filter(k => k.toLowerCase().includes('chess') || k.toLowerCase().includes('game')),
+          hasChessGame: !!window.chessGame,
+          hasGameSetup: !!window.gameSetup,
+          chessGameMethods: window.chessGame ? Object.keys(window.chessGame).slice(0, 20) : [],
+          gameSetupKeys: window.gameSetup ? Object.keys(window.gameSetup) : []
+        };
+
+        console.log('Debug info:', debug);
+
+        // Method 1: Try chessGame.getHistory()
+        if (window.chessGame && typeof window.chessGame.getHistory === 'function') {
+          try {
+            const history = window.chessGame.getHistory();
+            console.log('Found move history via chessGame.getHistory():', history);
+            if (history && history.length > 0) {
+              return { method: 'chessGame.getHistory', moves: history, format: 'unknown' };
+            }
+          } catch (e) {
+            console.log('chessGame.getHistory() failed:', e);
+          }
+        }
+
+        // Method 2: Try chessGame.getMoves() or similar
+        if (window.chessGame) {
+          const possibleMethods = ['getMoves', 'moves', 'getGame', 'history', 'pgn'];
+          for (const method of possibleMethods) {
+            if (typeof window.chessGame[method] === 'function') {
+              try {
+                const result = window.chessGame[method]();
+                console.log(`Found via chessGame.${method}():`, result);
+                if (result && (Array.isArray(result) || typeof result === 'string')) {
+                  return { method: `chessGame.${method}`, moves: result, format: 'unknown' };
+                }
+              } catch (e) {
+                // Ignore
+              }
+            }
+          }
+        }
+
+        // Method 3: Check gameSetup
+        if (window.gameSetup && window.gameSetup.moves) {
+          console.log('Found move history via gameSetup.moves:', window.gameSetup.moves);
+          return { method: 'gameSetup', moves: window.gameSetup.moves, format: 'unknown' };
+        }
+
+        // Method 4: Parse from move list in DOM (look for SAN notation)
+        const moveSelectors = [
+          '.move',
+          '.node',
+          '[class*="move"]',
+          '[class*="node"]',
+          '[data-whole-move-number]',
+          '.vertical-move-list .move',
+          '.move-text'
+        ];
+
+        for (const selector of moveSelectors) {
+          const moveElements = document.querySelectorAll(selector);
+          if (moveElements.length > 0) {
+            const moves = Array.from(moveElements)
+              .map(el => el.textContent.trim())
+              .filter(text => text && text.length > 0 && text.length < 10) // SAN moves are typically short
+              .filter(text => /^[NBRQK]?[a-h]?[1-8]?x?[a-h][1-8](=[NBRQ])?[+#]?$|^O-O(-O)?[+#]?$/.test(text)); // SAN pattern
+
+            if (moves.length > 0) {
+              console.log(`Found ${moves.length} moves from DOM (${selector}):`, moves.slice(0, 10));
+              return { method: 'dom', moves, format: 'san' };
+            }
+          }
+        }
+
+        console.log('No move history found');
+        return { method: 'none', moves: null, debug };
+      } catch (err) {
+        console.error('Error extracting move history:', err);
+        return { method: 'error', moves: null, error: err.message };
+      }
+    });
+
+    console.log('   → Move extraction result:', moveData.method);
+
+    if (!moveData || !moveData.moves) {
+      console.log('   ⚠ Could not extract move history from chess.com');
+      if (moveData?.debug) {
+        console.log('   → Debug info:', JSON.stringify(moveData.debug, null, 2));
+      }
+      return null;
+    }
+
+    let moves = moveData.moves;
+
+    // If we got a string (like PGN), try to parse it
+    if (typeof moves === 'string') {
+      // Extract moves from PGN-like string
+      moves = moves.match(/[NBRQK]?[a-h]?[1-8]?x?[a-h][1-8](=[NBRQ])?[+#]?|O-O(-O)?[+#]?/g) || [];
+    }
+
+    // Convert SAN to UCI if needed
+    if (moveData.format === 'san' || !moves[0]?.match(/^[a-h][1-8][a-h][1-8][qrbn]?$/)) {
+      console.log('   → Converting SAN to UCI...');
+      const uciMoves = [];
+      let position = new Chess().fen();
+
+      for (const sanMove of moves) {
+        const uciMove = sanToUci(sanMove, position);
+        if (uciMove) {
+          uciMoves.push(uciMove);
+          // Update position for next conversion
+          const tempChess = new Chess(position);
+          tempChess.move(sanMove);
+          position = tempChess.fen();
+        } else {
+          console.warn(`   ⚠ Could not convert SAN move: ${sanMove}`);
+          break;
+        }
+      }
+
+      if (uciMoves.length > 0) {
+        console.log(`   ✓ Converted ${uciMoves.length} SAN moves to UCI`);
+        return uciMoves;
+      }
+    }
+
+    // Already in UCI format
+    if (Array.isArray(moves) && moves.length > 0) {
+      console.log(`   ✓ Extracted ${moves.length} moves from chess.com (${moveData.method})`);
+      return moves;
+    }
+
+    console.log('   ⚠ Could not extract or convert move history');
+    return null;
+  } catch (error) {
+    console.error('Error extracting move history:', error.message);
+    return null;
+  }
+}
+
+/**
  * Internal function to sync position with board (detect opponent moves)
  * Returns object with sync details: { synced, positionsMatch, detectedMove, currentFen, expectedFen }
  */
@@ -236,6 +405,77 @@ async function syncPositionInternal() {
     const currentFen = await getBoardState();
     if (!currentFen) {
       return { synced: false, error: 'Could not read board state' };
+    }
+
+    // Check if move history is empty (starting from unknown position)
+    if (moveHistory.length === 0) {
+      console.log('   ℹ Move history is empty - attempting to extract from chess.com...');
+
+      // Try to extract move history from chess.com
+      const extractedMoves = await extractMoveHistoryFromChessCom();
+
+      if (extractedMoves && extractedMoves.length > 0) {
+        // Validate and use extracted moves
+        const validMoves = [];
+        const testChess = new Chess();
+
+        for (const move of extractedMoves) {
+          const from = move.substring(0, 2);
+          const to = move.substring(2, 4);
+          const promotion = move.length > 4 ? move[4] : undefined;
+
+          try {
+            testChess.move({ from, to, promotion });
+            validMoves.push(move);
+          } catch (err) {
+            console.warn(`   ⚠ Invalid extracted move: ${move}`);
+            break; // Stop at first invalid move
+          }
+        }
+
+        if (validMoves.length > 0) {
+          moveHistory = [...validMoves];
+          chess.load(testChess.fen());
+
+          console.log(`   ✓ Synced position with ${validMoves.length} extracted moves`);
+          console.log(`   → Move history: ${moveHistory.join(' ')}`);
+
+          return {
+            synced: true,
+            positionsMatch: true,
+            extractedMoves: true,
+            moveCount: validMoves.length,
+            currentFen,
+            expectedFen: testChess.fen()
+          };
+        }
+      }
+
+      // Couldn't extract moves - check if at starting position
+      const currentBoard = currentFen.split(' ')[0];
+      const startBoard = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR';
+
+      if (currentBoard === startBoard) {
+        console.log('   ✓ At starting position - no moves to sync');
+        return {
+          synced: true,
+          positionsMatch: true,
+          currentFen,
+          expectedFen: new Chess().fen(),
+          fromStartingPosition: true
+        };
+      }
+
+      // Mid-game with no extractable history
+      console.warn('   ⚠ Mid-game position with no move history');
+      return {
+        synced: false,
+        error: 'Could not extract move history from mid-game position',
+        currentFen,
+        expectedFen: new Chess().fen(),
+        needsManualSync: true,
+        suggestion: 'Use POST /position to manually set the move history'
+      };
     }
 
     // Get expected position from move history
@@ -299,13 +539,52 @@ async function syncPositionInternal() {
       };
     }
 
+    // Could not sync - try extracting full history as fallback
+    console.log('   ⚠ Positions diverged - attempting full re-sync...');
+    const extractedMoves = await extractMoveHistoryFromChessCom();
+
+    if (extractedMoves && extractedMoves.length > 0) {
+      const validMoves = [];
+      const testChess = new Chess();
+
+      for (const move of extractedMoves) {
+        const from = move.substring(0, 2);
+        const to = move.substring(2, 4);
+        const promotion = move.length > 4 ? move[4] : undefined;
+
+        try {
+          testChess.move({ from, to, promotion });
+          validMoves.push(move);
+        } catch (err) {
+          break;
+        }
+      }
+
+      if (validMoves.length > 0) {
+        moveHistory = [...validMoves];
+        chess.load(testChess.fen());
+
+        console.log(`   ✓ Re-synced with ${validMoves.length} extracted moves`);
+
+        return {
+          synced: true,
+          positionsMatch: false,
+          reSynced: true,
+          moveCount: validMoves.length,
+          currentFen,
+          expectedFen: testChess.fen()
+        };
+      }
+    }
+
     // Could not sync
-    console.warn('   ⚠ Could not sync position - positions too different');
+    console.warn('   ✗ Could not sync position - positions too different');
     return {
       synced: false,
       error: 'Could not detect opponent move - positions too different',
       currentFen,
-      expectedFen
+      expectedFen,
+      suggestion: 'Use POST /reset to start fresh, or POST /position to manually set the move history'
     };
   } catch (error) {
     console.error('Error syncing position:', error.message);
@@ -804,6 +1083,36 @@ app.post('/autoplay/enable', async (req, res) => {
       autoplayColor = color;
     }
 
+    // Auto-sync position before starting
+    console.log('');
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    console.log('🔄 Auto-syncing position before enabling autoplay...');
+
+    const syncResult = await syncPositionInternal();
+
+    if (syncResult.synced) {
+      if (syncResult.extractedMoves) {
+        console.log(`   ✓ Extracted ${syncResult.moveCount} moves from chess.com`);
+      } else if (syncResult.detectedMove) {
+        console.log(`   ✓ Detected opponent move: ${syncResult.detectedMove}`);
+      } else {
+        console.log('   ✓ Position already in sync');
+      }
+      console.log(`   → Current position: ${moveHistory.length} moves played`);
+      console.log(`   → Move history: ${moveHistory.join(' ') || 'none (starting position)'}`);
+    } else if (syncResult.needsManualSync) {
+      console.log('   ⚠ Could not auto-sync position');
+      console.log('   → Please use "sync" or "position" command to set the position first');
+      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+
+      return res.status(400).json({
+        success: false,
+        error: 'Could not sync position',
+        suggestion: syncResult.suggestion,
+        needsManualSync: true
+      });
+    }
+
     // Start autoplay
     startAutoplay();
 
@@ -811,6 +1120,9 @@ app.post('/autoplay/enable', async (req, res) => {
       success: true,
       message: 'Autoplay enabled',
       color: autoplayColor,
+      moveCount: moveHistory.length,
+      moveHistory: moveHistory.length > 0 ? moveHistory : undefined,
+      synced: syncResult.synced,
       timestamp: new Date().toISOString()
     });
   } catch (error) {
@@ -866,11 +1178,16 @@ app.post('/sync', async (req, res) => {
     const result = await syncPositionInternal();
 
     if (result.synced) {
-      if (result.positionsMatch) {
+      if (result.extractedMoves) {
+        console.log(`   ✓ Extracted ${result.moveCount} moves from chess.com`);
+        console.log(`   → Move history: ${moveHistory.join(' ')}`);
+      } else if (result.positionsMatch) {
         console.log('   ✓ Positions match - no opponent move detected');
-      } else {
+      } else if (result.detectedMove) {
         console.log(`   ✓ Detected opponent move: ${result.detectedMove}`);
         console.log(`   ✓ Move history updated (${moveHistory.length} moves)`);
+      } else if (result.reSynced) {
+        console.log(`   ✓ Re-synced with ${result.moveCount} moves`);
       }
       console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 
@@ -879,12 +1196,16 @@ app.post('/sync', async (req, res) => {
         synced: true,
         positionsMatch: result.positionsMatch,
         detectedMove: result.detectedMove,
+        extractedMoves: result.extractedMoves,
+        reSynced: result.reSynced,
         moveHistory,
         moveCount: moveHistory.length
       });
     } else {
-      console.log('   ✗ Could not determine opponent move');
-      console.log('   → You may need to manually set the position');
+      console.log('   ✗ Could not sync position');
+      if (result.suggestion) {
+        console.log(`   → ${result.suggestion}`);
+      }
       console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 
       res.json({
@@ -893,11 +1214,56 @@ app.post('/sync', async (req, res) => {
         error: result.error,
         currentFen: result.currentFen,
         expectedFen: result.expectedFen,
-        suggestion: 'Use POST /position to manually set the move history'
+        needsManualSync: result.needsManualSync,
+        suggestion: result.suggestion
       });
     }
   } catch (error) {
     console.error('❌ Error syncing position:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Debug endpoint to extract moves from chess.com
+app.get('/extract-moves', async (req, res) => {
+  try {
+    if (!connected) {
+      return res.status(400).json({ error: 'Not connected to browser' });
+    }
+
+    console.log('');
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    console.log('🔍 Extracting move history from chess.com...');
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+
+    const moves = await extractMoveHistoryFromChessCom();
+
+    if (moves && moves.length > 0) {
+      console.log(`✓ Extracted ${moves.length} moves`);
+      console.log(`→ Moves: ${moves.join(' ')}`);
+      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+
+      res.json({
+        success: true,
+        moves,
+        moveCount: moves.length,
+        movesString: moves.join(' ')
+      });
+    } else {
+      console.log('⚠ Could not extract moves');
+      console.log('→ This means chess.com doesn\'t expose move data in a readable format');
+      console.log('→ You can manually set the position using the "position" command');
+      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+
+      res.json({
+        success: false,
+        moves: null,
+        message: 'Could not extract move history from chess.com',
+        suggestion: 'Use the "position" command to manually set the move history. Example: position e2e4 e7e5 g1f3'
+      });
+    }
+  } catch (error) {
+    console.error('❌ Error extracting moves:', error);
     res.status(500).json({ error: error.message });
   }
 });
