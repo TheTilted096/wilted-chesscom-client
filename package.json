@@ -1,18 +1,21 @@
 {
   "name": "wilted-chesscom-client",
-  "version": "1.0.0",
-  "description": "A client to run with the Wilted-Chess-Engine on chess.com for experimenting",
-  "main": "src/index.js",
+  "version": "2.0.0",
+  "description": "API server to relay moves to chess.com via existing Chrome profile",
+  "main": "src/api-server.js",
   "type": "module",
   "scripts": {
-    "start": "node src/index.js",
-    "test": "node src/test-move.js"
+    "start": "node src/api-server.js",
+    "engine": "node src/engine-bridge.js",
+    "test": "node src/test-api.js"
   },
-  "keywords": ["chess", "uci", "automation"],
+  "keywords": ["chess", "uci", "automation", "api"],
   "author": "",
   "license": "MIT",
   "dependencies": {
-    "puppeteer": "^21.6.1",
-    "chess.js": "^1.0.0-beta.8"
+    "puppeteer-core": "^21.6.1",
+    "chess.js": "^1.0.0-beta.8",
+    "express": "^4.18.2",
+    "cors": "^2.8.5"
   }
 }

@@ -2,11 +2,36 @@
 
 A client to run with the Wilted-Chess-Engine on chess.com for experimenting with bots. **This is for testing against chess.com bots only, not for cheating against human players.**
 
-## Overview
+## 🆕 New API-Based Approach (Recommended)
+
+**Connects to your existing Chrome profile!**
+
+This new version uses Chrome's remote debugging protocol to control your already-logged-in browser. Perfect for:
+- ✅ Using your chess.com membership and premium bots
+- ✅ Working within organization-managed Chrome profiles
+- ✅ Keeping your existing login session
+
+**[📖 See README-API.md for full documentation](./README-API.md)**
+
+Quick start:
+```bash
+npm install
+./start-chrome.sh              # Start Chrome with debugging
+npm start                      # Start API server
+curl -X POST http://localhost:3000/move -H "Content-Type: application/json" -d '{"move":"e2e4"}'
+```
+
+---
+
+## Legacy Puppeteer Approach
+
+The original implementation launches a separate browser instance. **Use the API approach above if you need to use your Chrome profile.**
+
+### Overview
 
 This client automates the process of relaying moves between your chess engine and chess.com using browser automation (Puppeteer). It allows you to test your engine against chess.com's computer opponents.
 
-## Architecture
+### Architecture
 
 The system consists of three main components:
 
