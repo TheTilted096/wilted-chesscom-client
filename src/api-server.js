@@ -94,18 +94,22 @@ async function getBoardState() {
       // Try to get FEN from chess.com's internal state
       try {
         // Chess.com stores game data in various places
+        console.log('Checking window.gameSetup:', window.gameSetup);
+        console.log('Checking window.chessGame:', window.chessGame);
+
         if (window.gameSetup?.fen) return window.gameSetup.fen;
         if (window.chessGame?.getFEN) return window.chessGame.getFEN();
 
         // Fallback: parse from DOM
         const pieces = document.querySelectorAll('.piece');
+        console.log('Found pieces:', pieces.length);
         if (pieces.length === 0) return null;
 
         const board = Array(8).fill(null).map(() => Array(8).fill(null));
 
         pieces.forEach(piece => {
-          const square = piece.parentElement;
-          const classList = Array.from(square.classList);
+          // The square class is on the piece element itself, not the parent
+          const classList = Array.from(piece.classList);
 
           // Find square class (e.g., square-11, square-88)
           const squareClass = classList.find(c => c.match(/square-\d\d/));
@@ -117,24 +121,23 @@ async function getBoardState() {
           const file = parseInt(match[1]) - 1; // 1-8 -> 0-7
           const rank = 8 - parseInt(match[2]); // 1-8 -> 7-0
 
-          // Parse piece type and color
-          const pieceClasses = Array.from(piece.classList);
+          // Parse piece type and color from the 2-character piece code
           let pieceChar = '';
 
           // White pieces
-          if (pieceClasses.includes('wp')) pieceChar = 'P';
-          else if (pieceClasses.includes('wn')) pieceChar = 'N';
-          else if (pieceClasses.includes('wb')) pieceChar = 'B';
-          else if (pieceClasses.includes('wr')) pieceChar = 'R';
-          else if (pieceClasses.includes('wq')) pieceChar = 'Q';
-          else if (pieceClasses.includes('wk')) pieceChar = 'K';
+          if (classList.includes('wp')) pieceChar = 'P';
+          else if (classList.includes('wn')) pieceChar = 'N';
+          else if (classList.includes('wb')) pieceChar = 'B';
+          else if (classList.includes('wr')) pieceChar = 'R';
+          else if (classList.includes('wq')) pieceChar = 'Q';
+          else if (classList.includes('wk')) pieceChar = 'K';
           // Black pieces
-          else if (pieceClasses.includes('bp')) pieceChar = 'p';
-          else if (pieceClasses.includes('bn')) pieceChar = 'n';
-          else if (pieceClasses.includes('bb')) pieceChar = 'b';
-          else if (pieceClasses.includes('br')) pieceChar = 'r';
-          else if (pieceClasses.includes('bq')) pieceChar = 'q';
-          else if (pieceClasses.includes('bk')) pieceChar = 'k';
+          else if (classList.includes('bp')) pieceChar = 'p';
+          else if (classList.includes('bn')) pieceChar = 'n';
+          else if (classList.includes('bb')) pieceChar = 'b';
+          else if (classList.includes('br')) pieceChar = 'r';
+          else if (classList.includes('bq')) pieceChar = 'q';
+          else if (classList.includes('bk')) pieceChar = 'k';
 
           if (pieceChar && rank >= 0 && rank < 8 && file >= 0 && file < 8) {
             board[rank][file] = pieceChar;
@@ -191,82 +194,112 @@ async function executeMove(uciMove) {
   console.log(`Executing move: ${uciMove} (${from} -> ${to}${promotion ? ' =' + promotion : ''})`);
 
   try {
-    const result = await page.evaluate(({ from, to, promotion }) => {
+    console.log('  → Getting board coordinates...');
+
+    // Get the coordinates in browser context
+    const coords = await page.evaluate(({ from, to }) => {
       // Convert algebraic to coordinates
       const fromFile = from.charCodeAt(0) - 96; // a=1, b=2, etc.
       const fromRank = parseInt(from[1]);
       const toFile = to.charCodeAt(0) - 96;
       const toRank = parseInt(to[1]);
 
+      console.log(`  → Converting ${from} to coordinates:`, { fromFile, fromRank });
+      console.log(`  → Converting ${to} to coordinates:`, { toFile, toRank });
+
       // Check if board is flipped
       const board = document.querySelector('.board');
       const isFlipped = board?.classList.contains('flipped') || false;
+      console.log('  → Board flipped:', isFlipped);
 
       // Calculate square classes
       const fromSquareClass = isFlipped
-        ? `.square-${9 - fromFile}${9 - fromRank}`
-        : `.square-${fromFile}${fromRank}`;
+        ? `square-${9 - fromFile}${9 - fromRank}`
+        : `square-${fromFile}${fromRank}`;
 
-      const toSquareClass = isFlipped
-        ? `.square-${9 - toFile}${9 - toRank}`
-        : `.square-${toFile}${toRank}`;
+      console.log('  → Looking for piece with class:', fromSquareClass);
 
-      // Find squares
-      const fromSquare = document.querySelector(fromSquareClass);
-      const toSquare = document.querySelector(toSquareClass);
+      // Find the piece with the from square class
+      const fromPiece = document.querySelector(`.piece.${fromSquareClass}`);
 
-      if (!fromSquare || !toSquare) {
+      if (!fromPiece) {
+        console.error('  ✗ No piece found!');
+        console.log('  → Available pieces:', Array.from(document.querySelectorAll('.piece')).map(p => p.className));
         return {
           success: false,
-          error: `Squares not found: ${fromSquareClass}, ${toSquareClass}`
+          error: `No piece found on ${from} (looking for class: ${fromSquareClass})`
         };
       }
 
-      // Check if there's a piece on the from square
-      const piece = fromSquare.querySelector('.piece');
-      if (!piece) {
-        return {
-          success: false,
-          error: `No piece on ${from}`
+      console.log('  ✓ Found piece:', fromPiece.className);
+
+      // Calculate pixel coordinates for the destination
+      const boardRect = board.getBoundingClientRect();
+      const squareSize = boardRect.width / 8;
+
+      // Calculate which square to click (accounting for board flip)
+      const toFileIdx = isFlipped ? (8 - toFile) : (toFile - 1);
+      const toRankIdx = isFlipped ? (toRank - 1) : (8 - toRank);
+
+      const toX = boardRect.left + (toFileIdx * squareSize) + (squareSize / 2);
+      const toY = boardRect.top + (toRankIdx * squareSize) + (squareSize / 2);
+
+      // Get the piece's position
+      const pieceRect = fromPiece.getBoundingClientRect();
+      const fromX = pieceRect.left + pieceRect.width / 2;
+      const fromY = pieceRect.top + pieceRect.height / 2;
+
+      return {
+        success: true,
+        fromX,
+        fromY,
+        toX,
+        toY
+      };
+    }, { from, to });
+
+    if (!coords.success) {
+      console.error('  ✗ Failed to get coordinates:', coords.error);
+      throw new Error(coords.error || 'Failed to find piece');
+    }
+
+    console.log('  ✓ Coordinates calculated:', coords);
+    console.log('  → Performing drag-and-drop...');
+
+    // Use Puppeteer's mouse API to perform drag-and-drop
+    console.log(`  → Moving to piece at (${coords.fromX}, ${coords.fromY})`);
+    await page.mouse.move(coords.fromX, coords.fromY);
+    console.log('  → Mouse down');
+    await page.mouse.down();
+    await page.waitForTimeout(100);
+    console.log(`  → Dragging to (${coords.toX}, ${coords.toY})`);
+    await page.mouse.move(coords.toX, coords.toY, { steps: 10 });
+    await page.waitForTimeout(100);
+    console.log('  → Mouse up');
+    await page.mouse.up();
+
+    // Handle promotion if needed
+    if (promotion) {
+      await page.waitForTimeout(200);
+      await page.evaluate((promo) => {
+        const pieceMap = {
+          'q': 'queen',
+          'r': 'rook',
+          'b': 'bishop',
+          'n': 'knight'
         };
-      }
-
-      // Method 1: Click source, then destination
-      fromSquare.click();
-
-      // Wait a bit then click destination
-      setTimeout(() => {
-        toSquare.click();
-
-        // Handle promotion if needed
-        if (promotion) {
-          setTimeout(() => {
-            const pieceMap = {
-              'q': 'queen',
-              'r': 'rook',
-              'b': 'bishop',
-              'n': 'knight'
-            };
-            const pieceName = pieceMap[promotion.toLowerCase()];
-            if (pieceName) {
-              const promotionPiece = document.querySelector(
-                `.promotion-piece.${pieceName}, .promotion-${pieceName}`
-              );
-              if (promotionPiece) promotionPiece.click();
-            }
-          }, 100);
+        const pieceName = pieceMap[promo.toLowerCase()];
+        if (pieceName) {
+          const promotionPiece = document.querySelector(
+            `.promotion-piece.${pieceName}, .promotion-${pieceName}`
+          );
+          if (promotionPiece) promotionPiece.click();
         }
-      }, 50);
-
-      return { success: true };
-    }, { from, to, promotion });
-
-    if (!result.success) {
-      throw new Error(result.error || 'Move execution failed');
+      }, promotion);
     }
 
     // Wait for move to be processed
-    await page.waitForTimeout(500);
+    await page.waitForTimeout(300);
 
     console.log('✓ Move executed successfully');
     return { success: true, move: uciMove };
@@ -328,29 +361,44 @@ app.post('/move', async (req, res) => {
   try {
     const { move } = req.body;
 
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    console.log('📨 Received move request:', move);
+
     if (!move) {
+      console.log('❌ No move provided in request body');
       return res.status(400).json({ error: 'Move required (UCI format, e.g., e2e4)' });
     }
 
     if (!connected) {
+      console.log('❌ Not connected to browser');
       return res.status(400).json({ error: 'Not connected to browser' });
+    }
+
+    if (!page) {
+      console.log('❌ No page object available');
+      return res.status(400).json({ error: 'No page object available' });
     }
 
     // Validate UCI format
     const uciPattern = /^[a-h][1-8][a-h][1-8][qrbn]?$/;
     if (!uciPattern.test(move)) {
+      console.log('❌ Invalid UCI move format:', move);
       return res.status(400).json({ error: 'Invalid UCI move format' });
     }
 
+    console.log('✓ Starting move execution...');
     const result = await executeMove(move);
+    console.log('✓ Move execution completed:', result);
 
     res.json({
       success: true,
       move,
+      result,
       timestamp: new Date().toISOString()
     });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    console.error('❌ Error in /move endpoint:', error);
+    res.status(500).json({ error: error.message, stack: error.stack });
   }
 });
 
@@ -369,6 +417,51 @@ app.get('/status', async (req, res) => {
       pageUrl: page ? page.url() : null,
       timestamp: new Date().toISOString()
     });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Debug endpoint to inspect page structure
+app.get('/debug', async (req, res) => {
+  try {
+    if (!connected) {
+      return res.status(400).json({ error: 'Not connected to browser' });
+    }
+
+    const debugInfo = await page.evaluate(() => {
+      return {
+        hasGameSetup: !!window.gameSetup,
+        hasChessGame: !!window.chessGame,
+        gameSetupKeys: window.gameSetup ? Object.keys(window.gameSetup) : [],
+        chessGameKeys: window.chessGame ? Object.keys(window.chessGame) : [],
+        pieceCount: document.querySelectorAll('.piece').length,
+        altPieceCount: document.querySelectorAll('[class*="piece"]').length,
+        boardExists: !!document.querySelector('.board'),
+        boardClasses: document.querySelector('.board')?.className || 'no board found',
+        sampleSquareClasses: Array.from(document.querySelectorAll('[class*="square"]')).slice(0, 10).map(el => el.className),
+        allClassesWithPiece: Array.from(new Set(
+          Array.from(document.querySelectorAll('[class*="piece"]'))
+            .map(el => Array.from(el.classList).join(' '))
+        )).slice(0, 10),
+        // Check for e4 square specifically
+        e4Exists: !!document.querySelector('.square-54'),
+        e4Classes: document.querySelector('.square-54')?.className || 'not found',
+        // Check all square-54 elements
+        allSquare54: Array.from(document.querySelectorAll('[class*="square-54"]')).map(el => ({
+          tag: el.tagName,
+          classes: el.className,
+          parent: el.parentElement?.className
+        })),
+        // Check board structure
+        boardChildren: Array.from(document.querySelector('.board')?.children || []).map(el => ({
+          tag: el.tagName,
+          classes: String(el.className).substring(0, 50)
+        }))
+      };
+    });
+
+    res.json(debugInfo);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
