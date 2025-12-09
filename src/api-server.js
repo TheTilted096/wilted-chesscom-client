@@ -25,7 +25,6 @@ try {
   config = {
     engine: {
       path: './engine',
-      threads: 1,
       nodes: 1000000
     }
   };
@@ -54,7 +53,6 @@ let autoplayInterval = null;
 let autoplayBusy = false; // Prevent concurrent autoplay actions
 let engineConfig = {
   nodes: config.engine?.nodes || 1000000,
-  threads: config.engine?.threads || 1,
   selectedEngine: null // Currently selected engine name
 };
 
@@ -403,14 +401,14 @@ function startAutoplay() {
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
   console.log('🤖 AUTOPLAY ENABLED');
   console.log(`   Playing as: ${autoplayColor}`);
-  console.log(`   Checking every 2 seconds...`);
+  console.log(`   Checking every 0.25 seconds...`);
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
   console.log('');
 
   autoplayEnabled = true;
 
-  // Check every 2 seconds
-  autoplayInterval = setInterval(autoplayLoop, 2000);
+  // Check every 0.25 seconds (250ms)
+  autoplayInterval = setInterval(autoplayLoop, 250);
 
   // Run immediately
   autoplayLoop();
@@ -441,7 +439,8 @@ async function getBoardState() {
   if (!page) throw new Error('Not connected to browser');
 
   try {
-    const fen = await page.evaluate(() => {
+    // Pass moveHistory to determine side to move
+    const fen = await page.evaluate((moveCount) => {
       // Try to get FEN from chess.com's internal state
       try {
         // Chess.com stores game data in various places
@@ -514,16 +513,16 @@ async function getBoardState() {
           if (rank < 7) fen += '/';
         }
 
-        // Detect turn by checking which side can move
-        const isFlipped = document.querySelector('.board')?.classList.contains('flipped');
-        const turn = 'w'; // Simplified - would need more logic to detect actual turn
+        // Detect turn based on move count
+        // Even number of moves = white's turn, odd = black's turn
+        const turn = (moveCount % 2 === 0) ? 'w' : 'b';
 
         return `${fen} ${turn} KQkq - 0 1`;
       } catch (err) {
         console.error('Error parsing board:', err);
         return null;
       }
-    });
+    }, moveHistory.length);
 
     return fen;
   } catch (error) {
@@ -563,10 +562,8 @@ async function executeMove(uciMove) {
       const isFlipped = board?.classList.contains('flipped') || false;
       console.log('  → Board flipped:', isFlipped);
 
-      // Calculate square classes
-      const fromSquareClass = isFlipped
-        ? `square-${9 - fromFile}${9 - fromRank}`
-        : `square-${fromFile}${fromRank}`;
+      // Square classes represent actual chess squares (don't change with flip)
+      const fromSquareClass = `square-${fromFile}${fromRank}`;
 
       console.log('  → Looking for piece with class:', fromSquareClass);
 
@@ -617,40 +614,33 @@ async function executeMove(uciMove) {
     console.log('  ✓ Coordinates calculated:', coords);
     console.log('  → Performing drag-and-drop...');
 
-    // Use Puppeteer's mouse API to perform drag-and-drop
+    // Use Puppeteer's mouse API to perform drag-and-drop (faster animation)
     console.log(`  → Moving to piece at (${coords.fromX}, ${coords.fromY})`);
     await page.mouse.move(coords.fromX, coords.fromY);
     console.log('  → Mouse down');
     await page.mouse.down();
-    await page.waitForTimeout(100);
+    await page.waitForTimeout(50); // Reduced from 100ms
     console.log(`  → Dragging to (${coords.toX}, ${coords.toY})`);
-    await page.mouse.move(coords.toX, coords.toY, { steps: 10 });
-    await page.waitForTimeout(100);
+    await page.mouse.move(coords.toX, coords.toY, { steps: 5 }); // Reduced from 10 steps
+    await page.waitForTimeout(50); // Reduced from 100ms
     console.log('  → Mouse up');
     await page.mouse.up();
 
-    // Handle promotion if needed
+    // Handle promotion if needed (click destination square again)
     if (promotion) {
-      await page.waitForTimeout(200);
-      await page.evaluate((promo) => {
-        const pieceMap = {
-          'q': 'queen',
-          'r': 'rook',
-          'b': 'bishop',
-          'n': 'knight'
-        };
-        const pieceName = pieceMap[promo.toLowerCase()];
-        if (pieceName) {
-          const promotionPiece = document.querySelector(
-            `.promotion-piece.${pieceName}, .promotion-${pieceName}`
-          );
-          if (promotionPiece) promotionPiece.click();
-        }
-      }, promotion);
+      console.log(`  → Handling promotion to ${promotion}...`);
+      await page.waitForTimeout(100); // Wait for promotion dialog to appear
+
+      // Simply click the destination square again (promotes to queen by default)
+      console.log(`  → Clicking destination square again at (${coords.toX}, ${coords.toY})`);
+      await page.mouse.click(coords.toX, coords.toY);
+      console.log('  ✓ Promotion piece selected');
+
+      await page.waitForTimeout(150);
     }
 
     // Wait for move to be processed
-    await page.waitForTimeout(300);
+    await page.waitForTimeout(200); // Reduced from 300ms
 
     console.log('✓ Move executed successfully');
     return { success: true, move: uciMove };
@@ -1118,14 +1108,11 @@ app.post('/engine/enable', async (req, res) => {
     console.log('🤖 Starting chess engine...');
     console.log(`   Engine: ${selectedEngineName}`);
     console.log(`   Path: ${enginePath}`);
-    console.log(`   Threads: ${engineConfig.threads}`);
     console.log(`   Node limit: ${engineConfig.nodes}`);
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 
     // Create and start engine
-    engine = new UCIEngine(enginePath, {
-      threads: engineConfig.threads
-    });
+    engine = new UCIEngine(enginePath);
 
     await engine.start();
     engineEnabled = true;
@@ -1234,14 +1221,11 @@ app.post('/engine/switch', async (req, res) => {
     console.log('🔄 Switching chess engine...');
     console.log(`   From: ${previousEngine || 'none'}`);
     console.log(`   To: ${newEngineName}`);
-    console.log(`   Threads: ${engineConfig.threads}`);
     console.log(`   Node limit: ${engineConfig.nodes}`);
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 
     // Start new engine
-    engine = new UCIEngine(newEngine.path, {
-      threads: engineConfig.threads
-    });
+    engine = new UCIEngine(newEngine.path);
 
     await engine.start();
     engineEnabled = true;
@@ -1271,60 +1255,32 @@ app.post('/engine/switch', async (req, res) => {
 // Configure engine
 app.post('/engine/config', async (req, res) => {
   try {
-    const { nodes, threads } = req.body;
+    const { nodes } = req.body;
+
+    if (nodes === undefined) {
+      return res.status(400).json({
+        success: false,
+        error: 'Node limit required. Provide { "nodes": 1000000 }'
+      });
+    }
 
     const wasEnabled = engineEnabled;
-    const currentEngine = engineConfig.selectedEngine;
-
-    // If engine is running, stop it first
-    if (engineEnabled && engine) {
-      console.log('Stopping engine to apply new configuration...');
-      await engine.quit();
-      engine = null;
-      engineEnabled = false;
-    }
 
     // Update configuration
-    if (nodes !== undefined) {
-      engineConfig.nodes = parseInt(nodes);
-      console.log(`✓ Node limit updated: ${engineConfig.nodes}`);
-    }
-    if (threads !== undefined) {
-      engineConfig.threads = parseInt(threads);
-      console.log(`✓ Threads updated: ${engineConfig.threads}`);
-    }
+    engineConfig.nodes = parseInt(nodes);
+    console.log(`✓ Node limit updated: ${engineConfig.nodes}`);
 
-    // Restart engine if it was running
-    if (wasEnabled && currentEngine) {
-      console.log('Restarting engine with new configuration...');
-      const availableEngines = discoverEngines();
-      const engineInfo = availableEngines.find(e => e.name === currentEngine);
-
-      if (!engineInfo) {
-        return res.status(400).json({
-          success: false,
-          error: `Previously selected engine "${currentEngine}" no longer available`
-        });
-      }
-
-      engine = new UCIEngine(engineInfo.path, {
-        threads: engineConfig.threads
-      });
-      await engine.start();
-      engineEnabled = true;
-      engineConfig.selectedEngine = currentEngine;
-      console.log('✓ Engine restarted with new configuration');
-    }
+    // If engine is running and was enabled, it will use the new nodes on next search
+    // No need to restart the engine
 
     res.json({
       success: true,
       message: 'Engine configuration updated',
       config: {
         nodes: engineConfig.nodes,
-        threads: engineConfig.threads,
         selectedEngine: engineConfig.selectedEngine
       },
-      engineEnabled
+      engineEnabled: wasEnabled
     });
   } catch (error) {
     console.error('❌ Failed to configure engine:', error.message);
@@ -1345,8 +1301,7 @@ app.get('/engine/status', (req, res) => {
     thinking: engine ? engine.thinking : false,
     selectedEngine: engineConfig.selectedEngine,
     config: {
-      nodes: engineConfig.nodes,
-      threads: engineConfig.threads
+      nodes: engineConfig.nodes
     },
     availableEngines: availableEngines.map(e => ({
       name: e.name,
@@ -1469,7 +1424,7 @@ async function start() {
       console.log(`    POST http://localhost:${PORT}/engine/switch`);
       console.log('         Body: { "engine": "engine-name" }');
       console.log(`    POST http://localhost:${PORT}/engine/config`);
-      console.log('         Body: { "nodes": 1000000, "threads": 1 }');
+      console.log('         Body: { "nodes": 1000000 }');
       console.log(`    GET  http://localhost:${PORT}/engine/status`);
       console.log('         Returns engine status and available engines');
       console.log(`    GET  http://localhost:${PORT}/engine/suggest`);

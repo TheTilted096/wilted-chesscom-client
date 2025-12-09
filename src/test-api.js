@@ -80,7 +80,6 @@ async function enableEngine(engineName = null) {
     if (result.success) {
       console.log(`✓ Engine enabled: ${result.selectedEngine}`);
       console.log(`   Nodes: ${result.config.nodes}`);
-      console.log(`   Threads: ${result.config.threads}`);
     } else {
       console.log('❌ Failed:', result.error);
     }
@@ -124,11 +123,14 @@ async function switchEngine(engineName) {
   }
 }
 
-async function configEngine(nodes, threads) {
+async function configEngine(nodes) {
   try {
-    const body = {};
-    if (nodes) body.nodes = parseInt(nodes);
-    if (threads) body.threads = parseInt(threads);
+    if (!nodes) {
+      console.log('❌ Usage: config <nodes>');
+      return;
+    }
+
+    const body = { nodes: parseInt(nodes) };
 
     console.log('\n⚙️  Configuring engine...');
     const result = await apiRequest('POST', '/engine/config', body);
@@ -136,7 +138,6 @@ async function configEngine(nodes, threads) {
     if (result.success) {
       console.log('✓ Configuration updated');
       console.log(`   Nodes: ${result.config.nodes}`);
-      console.log(`   Threads: ${result.config.threads}`);
       console.log(`   Engine: ${result.config.selectedEngine || 'none'}`);
     } else {
       console.log('❌ Failed:', result.error);
@@ -155,7 +156,6 @@ async function engineStatus() {
     console.log(`   Thinking: ${result.thinking ? 'Yes' : 'No'}`);
     console.log(`   Selected: ${result.selectedEngine || 'none'}`);
     console.log(`   Nodes: ${result.config.nodes}`);
-    console.log(`   Threads: ${result.config.threads}`);
 
     if (result.availableEngines && result.availableEngines.length > 0) {
       console.log('\n   Available Engines:');
@@ -356,7 +356,7 @@ async function main() {
   console.log('    enable [name]  - Enable engine (auto-select if no name)');
   console.log('    disable        - Disable engine');
   console.log('    switch <name>  - Switch to different engine');
-  console.log('    config <nodes> [threads] - Configure engine');
+  console.log('    config <nodes>     - Configure engine');
   console.log('    estatus        - Show engine status');
   console.log('    suggest        - Get engine move suggestion');
   console.log('');
@@ -403,7 +403,7 @@ async function main() {
         console.log('    enable [name]  - Enable engine (auto-select if no name)');
         console.log('    disable        - Disable engine');
         console.log('    switch <name>  - Switch to different engine');
-        console.log('    config <nodes> [threads] - Configure engine');
+        console.log('    config <nodes>     - Configure engine');
         console.log('    estatus        - Show engine status');
         console.log('    suggest        - Get engine move suggestion');
         console.log('');
@@ -446,9 +446,9 @@ async function main() {
         }
       } else if (command === 'config') {
         if (parts[1]) {
-          await configEngine(parts[1], parts[2]);
+          await configEngine(parts[1]);
         } else {
-          console.log('❌ Usage: config <nodes> [threads]');
+          console.log('❌ Usage: config <nodes>');
         }
       } else if (command === 'estatus') {
         await engineStatus();
