@@ -4,6 +4,9 @@ import express from 'express';
 import cors from 'cors';
 import puppeteer from 'puppeteer-core';
 import { Chess } from 'chess.js';
+import { UCIEngine } from './uci-engine.js';
+import { readFileSync, readdirSync, statSync } from 'fs';
+import { join, basename } from 'path';
 
 /**
  * API Server for chess.com move automation
@@ -12,6 +15,21 @@ import { Chess } from 'chess.js';
 
 const app = express();
 const PORT = 3000;
+
+// Load configuration
+let config = {};
+try {
+  config = JSON.parse(readFileSync('./config-api.json', 'utf8'));
+} catch (error) {
+  console.warn('Warning: Could not load config-api.json, using defaults');
+  config = {
+    engine: {
+      path: './engine',
+      threads: 1,
+      nodes: 1000000
+    }
+  };
+}
 
 // Middleware
 app.use(cors());
@@ -23,6 +41,62 @@ let page = null;
 let connected = false;
 let gameActive = false;
 let chess = new Chess();
+let moveHistory = []; // Track moves in UCI format (e2e4, e7e5, etc.)
+
+// Engine state
+let engine = null;
+let engineEnabled = false;
+
+// Autoplay state
+let autoplayEnabled = false;
+let autoplayColor = 'white'; // 'white' or 'black'
+let autoplayInterval = null;
+let autoplayBusy = false; // Prevent concurrent autoplay actions
+let engineConfig = {
+  nodes: config.engine?.nodes || 1000000,
+  threads: config.engine?.threads || 1,
+  selectedEngine: null // Currently selected engine name
+};
+
+const ENGINES_DIR = './engines';
+
+/**
+ * Discover available chess engines in the engines directory
+ */
+function discoverEngines() {
+  try {
+    const files = readdirSync(ENGINES_DIR);
+    const engines = [];
+
+    for (const file of files) {
+      const fullPath = join(ENGINES_DIR, file);
+      try {
+        const stats = statSync(fullPath);
+
+        // Check if it's a file and executable
+        if (stats.isFile() && file !== '.gitkeep') {
+          // On Unix, check if executable bit is set
+          const isExecutable = process.platform === 'win32' || (stats.mode & 0o111) !== 0;
+
+          engines.push({
+            name: file,
+            path: fullPath,
+            size: stats.size,
+            executable: isExecutable,
+            modified: stats.mtime
+          });
+        }
+      } catch (err) {
+        console.warn(`Could not stat ${fullPath}:`, err.message);
+      }
+    }
+
+    return engines;
+  } catch (error) {
+    console.warn('Could not read engines directory:', error.message);
+    return [];
+  }
+}
 
 /**
  * Connect to existing Edge instance
@@ -81,6 +155,283 @@ async function checkGameStatus() {
     console.error('Error checking game status:', error.message);
     return false;
   }
+}
+
+/**
+ * Detect whose turn it is
+ * Returns 'white', 'black', or null if unable to determine
+ */
+async function detectTurn() {
+  if (!page) return null;
+
+  try {
+    const turnInfo = await page.evaluate(() => {
+      // Method 1: Check for highlighted squares or move indicators
+      const board = document.querySelector('.board');
+      if (!board) return { method: 'none', turn: null };
+
+      // Method 2: Look for turn indicator text
+      const turnText = document.querySelector('.turn-indicator, .player-turn, [class*="turn"]');
+      if (turnText && turnText.textContent) {
+        const text = turnText.textContent.toLowerCase();
+        if (text.includes('white') || text.includes('you') && !board.classList.contains('flipped')) {
+          return { method: 'text', turn: 'white' };
+        }
+        if (text.includes('black') || text.includes('you') && board.classList.contains('flipped')) {
+          return { method: 'text', turn: 'black' };
+        }
+      }
+
+      // Method 3: Check if board is flipped and look for active player
+      const isFlipped = board.classList.contains('flipped');
+
+      // Method 4: Look for clock that's ticking or highlighted player
+      const whiteClock = document.querySelector('.clock-white, [class*="clock"][class*="white"], .player-component.player-bottom .clock, .clock.player-bottom');
+      const blackClock = document.querySelector('.clock-black, [class*="clock"][class*="black"], .player-component.player-top .clock, .clock.player-top');
+
+      // Active clock might have a specific class
+      if (whiteClock?.classList.contains('clock-active') || whiteClock?.classList.contains('running')) {
+        return { method: 'clock', turn: 'white' };
+      }
+      if (blackClock?.classList.contains('clock-active') || blackClock?.classList.contains('running')) {
+        return { method: 'clock', turn: 'black' };
+      }
+
+      // Return board flip status as fallback info
+      return { method: 'flip', turn: null, isFlipped };
+    });
+
+    // If we couldn't detect from DOM, use move history
+    if (!turnInfo.turn) {
+      // Even number of moves = white's turn, odd = black's turn
+      const turn = moveHistory.length % 2 === 0 ? 'white' : 'black';
+      return turn;
+    }
+
+    return turnInfo.turn;
+  } catch (error) {
+    console.error('Error detecting turn:', error.message);
+    // Fallback to move history
+    return moveHistory.length % 2 === 0 ? 'white' : 'black';
+  }
+}
+
+/**
+ * Check if it's our turn based on autoplay color setting
+ */
+async function isOurTurn() {
+  const currentTurn = await detectTurn();
+  return currentTurn === autoplayColor;
+}
+
+/**
+ * Internal function to sync position with board (detect opponent moves)
+ * Returns object with sync details: { synced, positionsMatch, detectedMove, currentFen, expectedFen }
+ */
+async function syncPositionInternal() {
+  if (!connected || !page) {
+    return { synced: false, error: 'Not connected' };
+  }
+
+  try {
+    // Get current board state from browser
+    const currentFen = await getBoardState();
+    if (!currentFen) {
+      return { synced: false, error: 'Could not read board state' };
+    }
+
+    // Get expected position from move history
+    const expectedChess = new Chess();
+    for (const move of moveHistory) {
+      const from = move.substring(0, 2);
+      const to = move.substring(2, 4);
+      const promotion = move.length > 4 ? move[4] : undefined;
+      try {
+        expectedChess.move({ from, to, promotion });
+      } catch (err) {
+        console.error(`   ✗ Invalid move in history: ${move}`);
+      }
+    }
+
+    const expectedFen = expectedChess.fen();
+
+    // Compare positions (only the board part, ignore turn/castling/etc)
+    const currentBoard = currentFen.split(' ')[0];
+    const expectedBoard = expectedFen.split(' ')[0];
+
+    if (currentBoard === expectedBoard) {
+      // Positions match - no opponent move detected
+      return {
+        synced: true,
+        positionsMatch: true,
+        currentFen,
+        expectedFen
+      };
+    }
+
+    // Positions don't match - try to find the move
+    const possibleMoves = expectedChess.moves({ verbose: true });
+    let detectedMove = null;
+
+    for (const move of possibleMoves) {
+      const testChess = new Chess(expectedFen);
+      testChess.move(move);
+      const testBoard = testChess.fen().split(' ')[0];
+
+      if (testBoard === currentBoard) {
+        // Found the move!
+        detectedMove = move.from + move.to + (move.promotion || '');
+        break;
+      }
+    }
+
+    if (detectedMove) {
+      console.log(`   🔄 Detected opponent move: ${detectedMove}`);
+      moveHistory.push(detectedMove);
+
+      // Update chess instance
+      chess.load(currentFen);
+
+      return {
+        synced: true,
+        positionsMatch: false,
+        detectedMove,
+        currentFen,
+        expectedFen
+      };
+    }
+
+    // Could not sync
+    console.warn('   ⚠ Could not sync position - positions too different');
+    return {
+      synced: false,
+      error: 'Could not detect opponent move - positions too different',
+      currentFen,
+      expectedFen
+    };
+  } catch (error) {
+    console.error('Error syncing position:', error.message);
+    return {
+      synced: false,
+      error: error.message
+    };
+  }
+}
+
+/**
+ * Autoplay loop - checks if it's our turn and plays engine move
+ */
+async function autoplayLoop() {
+  // Skip if already processing
+  if (autoplayBusy) {
+    return;
+  }
+
+  try {
+    autoplayBusy = true;
+
+    // Check if game is still active
+    const isActive = await checkGameStatus();
+    if (!isActive) {
+      console.log('⏸️  Game ended - autoplay paused');
+      return;
+    }
+
+    // SYNC POSITION FIRST - detect opponent moves
+    await syncPositionInternal();
+
+    // Check if it's our turn
+    const ourTurn = await isOurTurn();
+    const currentTurn = await detectTurn();
+
+    if (!ourTurn) {
+      // Not our turn, just wait
+      return;
+    }
+
+    console.log('');
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    console.log('🤖 AUTOPLAY - It\'s our turn!');
+    console.log(`   Playing as: ${autoplayColor}`);
+    console.log(`   Current turn: ${currentTurn}`);
+    console.log(`   Move history: ${moveHistory.join(' ')}`);
+
+    // Check if engine is ready
+    if (!engineEnabled || !engine || !engine.isReady()) {
+      console.log('❌ Engine not enabled or not ready');
+      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      return;
+    }
+
+    // Set position for engine
+    console.log('   Setting position...');
+    engine.setPosition('startpos', moveHistory);
+
+    // Get best move
+    console.log(`   Calculating (${engineConfig.nodes} nodes)...`);
+    const result = await engine.goNodes(engineConfig.nodes);
+    const bestMove = result.move;
+
+    console.log(`   ✓ Engine suggests: ${bestMove}`);
+
+    // Execute the move
+    console.log('   Executing move on board...');
+    await executeMove(bestMove);
+
+    // Track the move
+    moveHistory.push(bestMove);
+    console.log(`   ✓ Move completed! Total moves: ${moveHistory.length}`);
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    console.log('');
+
+  } catch (error) {
+    console.error('❌ Autoplay error:', error.message);
+  } finally {
+    autoplayBusy = false;
+  }
+}
+
+/**
+ * Start autoplay monitoring
+ */
+function startAutoplay() {
+  if (autoplayInterval) {
+    clearInterval(autoplayInterval);
+  }
+
+  console.log('');
+  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  console.log('🤖 AUTOPLAY ENABLED');
+  console.log(`   Playing as: ${autoplayColor}`);
+  console.log(`   Checking every 2 seconds...`);
+  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  console.log('');
+
+  autoplayEnabled = true;
+
+  // Check every 2 seconds
+  autoplayInterval = setInterval(autoplayLoop, 2000);
+
+  // Run immediately
+  autoplayLoop();
+}
+
+/**
+ * Stop autoplay monitoring
+ */
+function stopAutoplay() {
+  if (autoplayInterval) {
+    clearInterval(autoplayInterval);
+    autoplayInterval = null;
+  }
+
+  autoplayEnabled = false;
+
+  console.log('');
+  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  console.log('⏹️  AUTOPLAY DISABLED');
+  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  console.log('');
 }
 
 /**
@@ -349,9 +700,214 @@ app.get('/board', async (req, res) => {
     res.json({
       fen,
       gameActive: active,
+      moveHistory,
+      moveCount: moveHistory.length,
       timestamp: new Date().toISOString()
     });
   } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Reset move history (for new games)
+app.post('/reset', async (req, res) => {
+  try {
+    const previousMoveCount = moveHistory.length;
+    moveHistory = [];
+    chess.reset();
+
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    console.log('🔄 Position reset');
+    console.log(`   Cleared ${previousMoveCount} moves from history`);
+
+    // Send ucinewgame to engine if it's enabled
+    if (engineEnabled && engine && engine.isReady()) {
+      console.log('   Sending ucinewgame to engine...');
+      await engine.newGame();
+      console.log('   ✓ Engine reset for new game');
+    }
+
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+
+    res.json({
+      success: true,
+      message: 'Move history reset',
+      previousMoveCount,
+      engineReset: engineEnabled && engine && engine.isReady(),
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Set move history manually
+app.post('/position', async (req, res) => {
+  try {
+    const { moves } = req.body;
+
+    if (!Array.isArray(moves)) {
+      return res.status(400).json({
+        error: 'Moves must be an array of UCI moves (e.g., ["e2e4", "e7e5"])'
+      });
+    }
+
+    // Validate each move is in UCI format
+    const uciPattern = /^[a-h][1-8][a-h][1-8][qrbn]?$/;
+    const invalidMoves = moves.filter(m => !uciPattern.test(m));
+
+    if (invalidMoves.length > 0) {
+      return res.status(400).json({
+        error: 'Invalid UCI move format',
+        invalidMoves
+      });
+    }
+
+    moveHistory = [...moves];
+
+    // Update chess.js instance to match
+    chess.reset();
+    for (const move of moveHistory) {
+      const from = move.substring(0, 2);
+      const to = move.substring(2, 4);
+      const promotion = move.length > 4 ? move[4] : undefined;
+      chess.move({ from, to, promotion });
+    }
+
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    console.log('📍 Position set manually');
+    console.log(`   Moves: ${moveHistory.join(' ')}`);
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+
+    res.json({
+      success: true,
+      message: 'Position set',
+      moveHistory,
+      moveCount: moveHistory.length,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Enable autoplay
+app.post('/autoplay/enable', async (req, res) => {
+  try {
+    const { color } = req.body;
+
+    if (!connected) {
+      return res.status(400).json({ error: 'Not connected to browser' });
+    }
+
+    if (!engineEnabled || !engine || !engine.isReady()) {
+      return res.status(400).json({ error: 'Engine not enabled. Use /engine/enable first' });
+    }
+
+    // Validate color
+    if (color && color !== 'white' && color !== 'black') {
+      return res.status(400).json({ error: 'Color must be "white" or "black"' });
+    }
+
+    // Set color (default to white)
+    if (color) {
+      autoplayColor = color;
+    }
+
+    // Start autoplay
+    startAutoplay();
+
+    res.json({
+      success: true,
+      message: 'Autoplay enabled',
+      color: autoplayColor,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Disable autoplay
+app.post('/autoplay/disable', async (req, res) => {
+  try {
+    stopAutoplay();
+
+    res.json({
+      success: true,
+      message: 'Autoplay disabled',
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get autoplay status
+app.get('/autoplay/status', async (req, res) => {
+  try {
+    const currentTurn = await detectTurn();
+    const ourTurn = await isOurTurn();
+
+    res.json({
+      enabled: autoplayEnabled,
+      color: autoplayColor,
+      busy: autoplayBusy,
+      currentTurn,
+      ourTurn,
+      gameActive,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Sync position with board (detect opponent moves)
+app.post('/sync', async (req, res) => {
+  try {
+    if (!connected) {
+      return res.status(400).json({ error: 'Not connected to browser' });
+    }
+
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    console.log('🔄 Syncing position with board...');
+
+    const result = await syncPositionInternal();
+
+    if (result.synced) {
+      if (result.positionsMatch) {
+        console.log('   ✓ Positions match - no opponent move detected');
+      } else {
+        console.log(`   ✓ Detected opponent move: ${result.detectedMove}`);
+        console.log(`   ✓ Move history updated (${moveHistory.length} moves)`);
+      }
+      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+
+      res.json({
+        success: true,
+        synced: true,
+        positionsMatch: result.positionsMatch,
+        detectedMove: result.detectedMove,
+        moveHistory,
+        moveCount: moveHistory.length
+      });
+    } else {
+      console.log('   ✗ Could not determine opponent move');
+      console.log('   → You may need to manually set the position');
+      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+
+      res.json({
+        success: false,
+        synced: false,
+        error: result.error,
+        currentFen: result.currentFen,
+        expectedFen: result.expectedFen,
+        suggestion: 'Use POST /position to manually set the move history'
+      });
+    }
+  } catch (error) {
+    console.error('❌ Error syncing position:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -390,10 +946,15 @@ app.post('/move', async (req, res) => {
     const result = await executeMove(move);
     console.log('✓ Move execution completed:', result);
 
+    // Track the move in history for engine
+    moveHistory.push(move);
+    console.log('✓ Move added to history. Total moves:', moveHistory.length);
+
     res.json({
       success: true,
       move,
       result,
+      moveHistory: moveHistory.length,
       timestamp: new Date().toISOString()
     });
   } catch (error) {
@@ -481,6 +1042,378 @@ app.post('/disconnect', async (req, res) => {
 });
 
 /**
+ * Engine Control Endpoints
+ */
+
+// List available engines
+app.get('/engine/list', (req, res) => {
+  const engines = discoverEngines();
+
+  res.json({
+    success: true,
+    engines,
+    count: engines.length,
+    enginesDir: ENGINES_DIR
+  });
+});
+
+// Enable engine
+app.post('/engine/enable', async (req, res) => {
+  try {
+    const { engine: engineName } = req.body;
+
+    if (engineEnabled && engine) {
+      return res.json({
+        success: true,
+        message: 'Engine already enabled',
+        engineEnabled: true,
+        selectedEngine: engineConfig.selectedEngine
+      });
+    }
+
+    // If no engine specified, try to use the first available one
+    let enginePath;
+    let selectedEngineName;
+
+    if (engineName) {
+      // User specified an engine
+      const availableEngines = discoverEngines();
+      const selectedEngine = availableEngines.find(e => e.name === engineName);
+
+      if (!selectedEngine) {
+        return res.status(400).json({
+          success: false,
+          error: `Engine "${engineName}" not found. Use GET /engine/list to see available engines.`,
+          availableEngines: availableEngines.map(e => e.name)
+        });
+      }
+
+      if (!selectedEngine.executable) {
+        return res.status(400).json({
+          success: false,
+          error: `Engine "${engineName}" is not executable. Please make it executable: chmod +x engines/${engineName}`
+        });
+      }
+
+      enginePath = selectedEngine.path;
+      selectedEngineName = engineName;
+    } else {
+      // Auto-select first available engine
+      const availableEngines = discoverEngines();
+      const executableEngines = availableEngines.filter(e => e.executable);
+
+      if (executableEngines.length === 0) {
+        return res.status(400).json({
+          success: false,
+          error: 'No executable engines found in engines/ directory. Please add a UCI chess engine.',
+          availableEngines: availableEngines.map(e => e.name)
+        });
+      }
+
+      enginePath = executableEngines[0].path;
+      selectedEngineName = executableEngines[0].name;
+    }
+
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    console.log('🤖 Starting chess engine...');
+    console.log(`   Engine: ${selectedEngineName}`);
+    console.log(`   Path: ${enginePath}`);
+    console.log(`   Threads: ${engineConfig.threads}`);
+    console.log(`   Node limit: ${engineConfig.nodes}`);
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+
+    // Create and start engine
+    engine = new UCIEngine(enginePath, {
+      threads: engineConfig.threads
+    });
+
+    await engine.start();
+    engineEnabled = true;
+    engineConfig.selectedEngine = selectedEngineName;
+
+    console.log('✓ Engine enabled and ready');
+
+    res.json({
+      success: true,
+      message: 'Engine enabled',
+      engineEnabled: true,
+      selectedEngine: selectedEngineName,
+      config: engineConfig
+    });
+  } catch (error) {
+    console.error('❌ Failed to enable engine:', error.message);
+    engineEnabled = false;
+    engine = null;
+    engineConfig.selectedEngine = null;
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      message: 'Failed to start engine. Make sure the engine executable exists and is compatible with UCI protocol.'
+    });
+  }
+});
+
+// Disable engine
+app.post('/engine/disable', async (req, res) => {
+  try {
+    if (!engineEnabled || !engine) {
+      return res.json({
+        success: true,
+        message: 'Engine already disabled',
+        engineEnabled: false
+      });
+    }
+
+    console.log('🤖 Stopping chess engine...');
+
+    const stoppedEngine = engineConfig.selectedEngine;
+    await engine.quit();
+    engine = null;
+    engineEnabled = false;
+    engineConfig.selectedEngine = null;
+
+    console.log('✓ Engine disabled');
+
+    res.json({
+      success: true,
+      message: 'Engine disabled',
+      engineEnabled: false,
+      stoppedEngine
+    });
+  } catch (error) {
+    console.error('❌ Failed to disable engine:', error.message);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// Switch to a different engine
+app.post('/engine/switch', async (req, res) => {
+  try {
+    const { engine: newEngineName } = req.body;
+
+    if (!newEngineName) {
+      return res.status(400).json({
+        success: false,
+        error: 'Engine name required. Provide { "engine": "engine-name" }'
+      });
+    }
+
+    // Check if the new engine exists
+    const availableEngines = discoverEngines();
+    const newEngine = availableEngines.find(e => e.name === newEngineName);
+
+    if (!newEngine) {
+      return res.status(400).json({
+        success: false,
+        error: `Engine "${newEngineName}" not found`,
+        availableEngines: availableEngines.map(e => e.name)
+      });
+    }
+
+    if (!newEngine.executable) {
+      return res.status(400).json({
+        success: false,
+        error: `Engine "${newEngineName}" is not executable. Please make it executable: chmod +x engines/${newEngineName}`
+      });
+    }
+
+    const previousEngine = engineConfig.selectedEngine;
+
+    // Stop current engine if running
+    if (engineEnabled && engine) {
+      console.log(`Stopping current engine: ${previousEngine}...`);
+      await engine.quit();
+      engine = null;
+      engineEnabled = false;
+    }
+
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    console.log('🔄 Switching chess engine...');
+    console.log(`   From: ${previousEngine || 'none'}`);
+    console.log(`   To: ${newEngineName}`);
+    console.log(`   Threads: ${engineConfig.threads}`);
+    console.log(`   Node limit: ${engineConfig.nodes}`);
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+
+    // Start new engine
+    engine = new UCIEngine(newEngine.path, {
+      threads: engineConfig.threads
+    });
+
+    await engine.start();
+    engineEnabled = true;
+    engineConfig.selectedEngine = newEngineName;
+
+    console.log('✓ Engine switch completed');
+
+    res.json({
+      success: true,
+      message: 'Engine switched successfully',
+      previousEngine: previousEngine || 'none',
+      currentEngine: newEngineName,
+      engineEnabled: true,
+      config: engineConfig
+    });
+  } catch (error) {
+    console.error('❌ Failed to switch engine:', error.message);
+    engineEnabled = false;
+    engine = null;
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// Configure engine
+app.post('/engine/config', async (req, res) => {
+  try {
+    const { nodes, threads } = req.body;
+
+    const wasEnabled = engineEnabled;
+    const currentEngine = engineConfig.selectedEngine;
+
+    // If engine is running, stop it first
+    if (engineEnabled && engine) {
+      console.log('Stopping engine to apply new configuration...');
+      await engine.quit();
+      engine = null;
+      engineEnabled = false;
+    }
+
+    // Update configuration
+    if (nodes !== undefined) {
+      engineConfig.nodes = parseInt(nodes);
+      console.log(`✓ Node limit updated: ${engineConfig.nodes}`);
+    }
+    if (threads !== undefined) {
+      engineConfig.threads = parseInt(threads);
+      console.log(`✓ Threads updated: ${engineConfig.threads}`);
+    }
+
+    // Restart engine if it was running
+    if (wasEnabled && currentEngine) {
+      console.log('Restarting engine with new configuration...');
+      const availableEngines = discoverEngines();
+      const engineInfo = availableEngines.find(e => e.name === currentEngine);
+
+      if (!engineInfo) {
+        return res.status(400).json({
+          success: false,
+          error: `Previously selected engine "${currentEngine}" no longer available`
+        });
+      }
+
+      engine = new UCIEngine(engineInfo.path, {
+        threads: engineConfig.threads
+      });
+      await engine.start();
+      engineEnabled = true;
+      engineConfig.selectedEngine = currentEngine;
+      console.log('✓ Engine restarted with new configuration');
+    }
+
+    res.json({
+      success: true,
+      message: 'Engine configuration updated',
+      config: {
+        nodes: engineConfig.nodes,
+        threads: engineConfig.threads,
+        selectedEngine: engineConfig.selectedEngine
+      },
+      engineEnabled
+    });
+  } catch (error) {
+    console.error('❌ Failed to configure engine:', error.message);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// Get engine status
+app.get('/engine/status', (req, res) => {
+  const availableEngines = discoverEngines();
+
+  res.json({
+    engineEnabled,
+    engineReady: engine ? engine.isReady() : false,
+    thinking: engine ? engine.thinking : false,
+    selectedEngine: engineConfig.selectedEngine,
+    config: {
+      nodes: engineConfig.nodes,
+      threads: engineConfig.threads
+    },
+    availableEngines: availableEngines.map(e => ({
+      name: e.name,
+      executable: e.executable,
+      size: e.size
+    }))
+  });
+});
+
+// Get engine move suggestion
+app.get('/engine/suggest', async (req, res) => {
+  try {
+    if (!engineEnabled || !engine) {
+      return res.status(400).json({
+        error: 'Engine not enabled. Call POST /engine/enable first.'
+      });
+    }
+
+    if (!connected) {
+      return res.status(400).json({
+        error: 'Not connected to browser'
+      });
+    }
+
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    console.log('🤖 Getting engine suggestion...');
+
+    // Get current board state
+    const fen = await getBoardState();
+    if (!fen) {
+      return res.status(400).json({
+        error: 'Could not read board state'
+      });
+    }
+
+    console.log(`   Position: ${fen}`);
+    console.log(`   Move history (${moveHistory.length} moves):`, moveHistory.join(' '));
+
+    // Set position for engine using move history
+    engine.setPosition('startpos', moveHistory);
+
+    // Get best move using node limit
+    console.log(`   Searching with ${engineConfig.nodes} nodes...`);
+    const result = await engine.goNodes(engineConfig.nodes);
+
+    console.log(`✓ Engine suggests: ${result.move}`);
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+
+    res.json({
+      success: true,
+      move: result.move,
+      ponder: result.ponder,
+      fen,
+      moveHistory,
+      nodes: engineConfig.nodes,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error('❌ Error getting engine suggestion:', error.message);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+/**
  * Start server
  */
 async function start() {
@@ -512,14 +1445,44 @@ async function start() {
       console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
       console.log('✓ Ready! API Endpoints:');
       console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-      console.log(`  POST http://localhost:${PORT}/move`);
-      console.log('       Body: { "move": "e2e4" }');
+      console.log('  BROWSER CONTROL:');
+      console.log(`    POST http://localhost:${PORT}/move`);
+      console.log('         Body: { "move": "e2e4" }');
+      console.log(`    GET  http://localhost:${PORT}/board`);
+      console.log('         Returns current FEN position and move history');
+      console.log(`    GET  http://localhost:${PORT}/status`);
+      console.log('         Returns connection and game status');
+      console.log(`    POST http://localhost:${PORT}/sync`);
+      console.log('         Detect opponent moves and sync position');
+      console.log(`    POST http://localhost:${PORT}/reset`);
+      console.log('         Reset move history (for new games)');
+      console.log(`    POST http://localhost:${PORT}/position`);
+      console.log('         Body: { "moves": ["e2e4", "e7e5"] }');
       console.log('');
-      console.log(`  GET  http://localhost:${PORT}/board`);
-      console.log('       Returns current FEN position');
+      console.log('  ENGINE CONTROL:');
+      console.log(`    GET  http://localhost:${PORT}/engine/list`);
+      console.log('         List all available engines in engines/ folder');
+      console.log(`    POST http://localhost:${PORT}/engine/enable`);
+      console.log('         Body: { "engine": "engine-name" } (optional, auto-selects first)');
+      console.log(`    POST http://localhost:${PORT}/engine/disable`);
+      console.log('         Disable chess engine');
+      console.log(`    POST http://localhost:${PORT}/engine/switch`);
+      console.log('         Body: { "engine": "engine-name" }');
+      console.log(`    POST http://localhost:${PORT}/engine/config`);
+      console.log('         Body: { "nodes": 1000000, "threads": 1 }');
+      console.log(`    GET  http://localhost:${PORT}/engine/status`);
+      console.log('         Returns engine status and available engines');
+      console.log(`    GET  http://localhost:${PORT}/engine/suggest`);
+      console.log('         Get engine move suggestion for current position');
       console.log('');
-      console.log(`  GET  http://localhost:${PORT}/status`);
-      console.log('       Returns connection and game status');
+      console.log('  AUTOPLAY (Automatic Engine Play):');
+      console.log(`    POST http://localhost:${PORT}/autoplay/enable`);
+      console.log('         Body: { "color": "white" } or { "color": "black" }');
+      console.log('         Automatically plays moves when it\'s your turn');
+      console.log(`    POST http://localhost:${PORT}/autoplay/disable`);
+      console.log('         Stop autoplay');
+      console.log(`    GET  http://localhost:${PORT}/autoplay/status`);
+      console.log('         Returns autoplay status and current turn info');
       console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
       console.log('');
     }
@@ -528,7 +1491,22 @@ async function start() {
   // Handle shutdown
   process.on('SIGINT', async () => {
     console.log('\n\nShutting down...');
+
+    // Stop autoplay if running
+    if (autoplayEnabled) {
+      console.log('Stopping autoplay...');
+      stopAutoplay();
+    }
+
+    // Stop engine if running
+    if (engine) {
+      console.log('Stopping engine...');
+      await engine.quit();
+    }
+
+    // Disconnect browser
     if (browser) await browser.disconnect();
+
     process.exit(0);
   });
 }

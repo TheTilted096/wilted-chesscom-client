@@ -183,7 +183,271 @@ Simple health check.
 }
 ```
 
-## Integrating with Your Engine
+## Built-in Chess Engine Integration
+
+The API server now includes built-in support for UCI chess engines! You can drop multiple engine executables into the `engines/` folder and select/switch between them at runtime.
+
+### Quick Setup
+
+1. **Create engines directory** (if not exists):
+   ```bash
+   mkdir engines
+   ```
+
+2. **Add your chess engines**:
+   ```bash
+   # Example: Copy Stockfish
+   cp /path/to/stockfish engines/stockfish
+
+   # Example: Copy your custom engine
+   cp /path/to/wilted engines/wilted
+
+   # Make them executable (Linux/Mac)
+   chmod +x engines/*
+   ```
+
+3. **Start the server** and the API will auto-discover all engines!
+
+### Configuration
+
+Edit `config-api.json` to set default engine settings:
+
+```json
+{
+  "engine": {
+    "threads": 1,
+    "nodes": 1000000
+  }
+}
+```
+
+- `threads`: Number of CPU threads for the engine to use
+- `nodes`: Default node limit for engine searches (higher = stronger but slower)
+
+**Note:** Engine path is no longer needed! Just drop executables in `engines/` folder.
+
+### GET /engine/list
+List all available engines discovered in the `engines/` folder.
+
+**Response:**
+```json
+{
+  "success": true,
+  "engines": [
+    {
+      "name": "stockfish",
+      "path": "./engines/stockfish",
+      "size": 15728640,
+      "executable": true,
+      "modified": "2024-01-15T10:00:00.000Z"
+    },
+    {
+      "name": "wilted",
+      "path": "./engines/wilted",
+      "size": 8388608,
+      "executable": true,
+      "modified": "2024-01-15T09:30:00.000Z"
+    }
+  ],
+  "count": 2,
+  "enginesDir": "./engines"
+}
+```
+
+### POST /engine/enable
+Start a chess engine. If no engine is specified, automatically selects the first available engine.
+
+**Request (optional):**
+```json
+{
+  "engine": "stockfish"
+}
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Engine enabled",
+  "engineEnabled": true,
+  "selectedEngine": "stockfish",
+  "config": {
+    "threads": 1,
+    "nodes": 1000000
+  }
+}
+```
+
+### POST /engine/disable
+Stop the chess engine.
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Engine disabled",
+  "engineEnabled": false,
+  "stoppedEngine": "stockfish"
+}
+```
+
+### POST /engine/switch
+Switch to a different engine at runtime (stops current engine and starts new one).
+
+**Request:**
+```json
+{
+  "engine": "wilted"
+}
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Engine switched successfully",
+  "previousEngine": "stockfish",
+  "currentEngine": "wilted",
+  "engineEnabled": true,
+  "config": {
+    "nodes": 1000000,
+    "threads": 1,
+    "selectedEngine": "wilted"
+  }
+}
+```
+
+### POST /engine/config
+Update engine configuration (nodes, threads). The engine will be restarted with new settings if it's currently running.
+
+**Request:**
+```json
+{
+  "nodes": 2000000,
+  "threads": 4
+}
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Engine configuration updated",
+  "config": {
+    "threads": 4,
+    "nodes": 2000000,
+    "selectedEngine": "stockfish"
+  },
+  "engineEnabled": true
+}
+```
+
+### GET /engine/status
+Get current engine status, configuration, and list of available engines.
+
+**Response:**
+```json
+{
+  "engineEnabled": true,
+  "engineReady": true,
+  "thinking": false,
+  "selectedEngine": "stockfish",
+  "config": {
+    "threads": 1,
+    "nodes": 1000000
+  },
+  "availableEngines": [
+    {
+      "name": "stockfish",
+      "executable": true,
+      "size": 15728640
+    },
+    {
+      "name": "wilted",
+      "executable": true,
+      "size": 8388608
+    }
+  ]
+}
+```
+
+### GET /engine/suggest
+Get the engine's suggested move for the current board position.
+
+**Response:**
+```json
+{
+  "success": true,
+  "move": "e2e4",
+  "ponder": "e7e5",
+  "fen": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+  "nodes": 1000000,
+  "timestamp": "2024-01-15T10:30:00.000Z"
+}
+```
+
+- `move`: Best move in UCI format
+- `ponder`: Suggested move to ponder on (opponent's expected response)
+- `fen`: Current board position
+- `nodes`: Number of nodes searched
+
+### Example: Engine-Assisted Play
+
+```bash
+# 1. List available engines
+curl http://localhost:3000/engine/list
+# Returns: {"engines": [{"name": "stockfish", ...}, {"name": "wilted", ...}]}
+
+# 2. Start an engine (auto-selects first available)
+curl -X POST http://localhost:3000/engine/enable
+
+# Or select a specific engine
+curl -X POST http://localhost:3000/engine/enable \
+  -H "Content-Type: application/json" \
+  -d '{"engine": "stockfish"}'
+
+# 3. Get engine's suggested move
+curl http://localhost:3000/engine/suggest
+# Returns: {"move": "e2e4", ...}
+
+# 4. Execute the move
+curl -X POST http://localhost:3000/move \
+  -H "Content-Type: application/json" \
+  -d '{"move": "e2e4"}'
+
+# 5. Switch to a different engine
+curl -X POST http://localhost:3000/engine/switch \
+  -H "Content-Type: application/json" \
+  -d '{"engine": "wilted"}'
+
+# 6. Configure engine for deeper search
+curl -X POST http://localhost:3000/engine/config \
+  -H "Content-Type: application/json" \
+  -d '{"nodes": 5000000, "threads": 8}'
+
+# 7. Get next suggestion with new settings
+curl http://localhost:3000/engine/suggest
+```
+
+### UCI Engine Requirements
+
+Your chess engine must support the Universal Chess Interface (UCI) protocol. Popular UCI engines include:
+
+- **Stockfish** - World's strongest open-source engine
+- **Komodo** - Strong commercial engine
+- **Leela Chess Zero** - Neural network-based engine
+- **Custom engines** - Any engine following UCI protocol
+
+The engine executable should respond to standard UCI commands:
+- `uci` - Initialize UCI mode
+- `isready` - Check if ready
+- `position` - Set board position
+- `go nodes X` - Search with node limit
+- `quit` - Shut down
+
+For reference on UCI protocol, see: https://gist.github.com/DOBRO/2592c6dad754ba67e6dcaec8c90165bf
+
+## Integrating with Your Engine (Advanced)
 
 Create a simple bridge script that:
 1. Starts your UCI engine

@@ -8,8 +8,8 @@
     "debugUrl": "http://localhost:9223"
   },
   "engine": {
-    "path": "/home/user/Wilted-Chess-Engine/bin/wilted",
-    "threads": 8,
+    "threads": 1,
+    "nodes": 1000000,
     "moveTime": 60000,
     "increment": 1000
   },
