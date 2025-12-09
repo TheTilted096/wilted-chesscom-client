@@ -1,0 +1,8 @@
+{
+  "enginePath": "/home/user/Wilted-Chess-Engine/bin/wilted",
+  "threads": 8,
+  "moveTime": 60000,
+  "increment": 1000,
+  "headless": false,
+  "gamesCount": 1
+}
