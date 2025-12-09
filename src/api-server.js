@@ -25,11 +25,11 @@ let gameActive = false;
 let chess = new Chess();
 
 /**
- * Connect to existing Chrome instance
+ * Connect to existing Edge instance
  */
-async function connectToChrome(debuggerUrl = 'http://localhost:9222') {
+async function connectToEdge(debuggerUrl = 'http://localhost:9223') {
   try {
-    console.log(`Connecting to Chrome at ${debuggerUrl}...`);
+    console.log(`Connecting to Edge at ${debuggerUrl}...`);
 
     browser = await puppeteer.connect({
       browserURL: debuggerUrl,
@@ -56,9 +56,9 @@ async function connectToChrome(debuggerUrl = 'http://localhost:9222') {
 
     return true;
   } catch (error) {
-    console.error('Failed to connect to Chrome:', error.message);
-    console.error('\nMake sure Chrome is running with remote debugging enabled:');
-    console.error('  google-chrome --remote-debugging-port=9222');
+    console.error('Failed to connect to Edge:', error.message);
+    console.error('\nMake sure Edge is running with remote debugging enabled:');
+    console.error('  msedge.exe --remote-debugging-port=9223');
     return false;
   }
 }
@@ -294,12 +294,12 @@ app.get('/health', (req, res) => {
 // Connect to browser
 app.post('/connect', async (req, res) => {
   const { debuggerUrl } = req.body;
-  const success = await connectToChrome(debuggerUrl || 'http://localhost:9222');
+  const success = await connectToEdge(debuggerUrl || 'http://localhost:9223');
 
   res.json({
     success,
     connected,
-    message: success ? 'Connected to Chrome' : 'Failed to connect'
+    message: success ? 'Connected to Edge' : 'Failed to connect'
   });
 });
 
@@ -400,20 +400,19 @@ async function start() {
   app.listen(PORT, () => {
     console.log(`✓ API Server running on http://localhost:${PORT}`);
     console.log('');
-    console.log('STEP 1: Start Chrome with remote debugging:');
-    console.log('  google-chrome --remote-debugging-port=9222 --user-data-dir="/path/to/your/profile"');
-    console.log('  OR on macOS:');
-    console.log('  /Applications/Google\\ Chrome.app/Contents/MacOS/Google\\ Chrome --remote-debugging-port=9222 --user-data-dir="$HOME/Library/Application Support/Google/Chrome/Default"');
+    console.log('STEP 1: Start Edge with remote debugging:');
+    console.log('  Use the start-edge.ps1 script OR run manually:');
+    console.log('  msedge.exe --remote-debugging-port=9223 --user-data-dir="path/to/profile"');
     console.log('');
     console.log('STEP 2: Navigate to chess.com and start a game');
     console.log('');
-    console.log('STEP 3: Auto-connect to Chrome...');
+    console.log('STEP 3: Auto-connect to Edge...');
     console.log('');
   });
 
-  // Auto-connect to Chrome
+  // Auto-connect to Edge
   setTimeout(async () => {
-    await connectToChrome();
+    await connectToEdge();
 
     if (connected) {
       console.log('');

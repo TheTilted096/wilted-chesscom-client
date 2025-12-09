@@ -77,7 +77,7 @@ async function main() {
   if (!gameActive) {
     console.log('\n⚠️  Make sure:');
     console.log('  1. API server is running (npm start)');
-    console.log('  2. Chrome is open with debugging enabled');
+    console.log('  2. Edge is open with debugging enabled (port 9223)');
     console.log('  3. You have a chess.com game open');
     console.log('\nPress Ctrl+C to exit');
     process.exit(1);

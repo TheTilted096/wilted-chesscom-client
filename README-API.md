@@ -1,16 +1,16 @@
 # Wilted Chess.com Client - API Mode
 
-**New Architecture:** Connect to your existing Chrome profile via API
+**New Architecture:** Connect to your existing Edge profile via API
 
-This version uses Chrome's remote debugging protocol to connect to your already-logged-in browser, exposing a REST API that accepts UCI moves and executes them on chess.com.
+This version uses Edge's remote debugging protocol to connect to your already-logged-in browser, exposing a REST API that accepts UCI moves and executes them on chess.com.
 
 ## Why This Approach?
 
-✅ **Works with your Chrome profile** - Use your existing logged-in session
+✅ **Works with your Edge profile** - Use your existing logged-in session
 ✅ **Access to premium bots** - No need to log in separately
 ✅ **Organization-friendly** - Works within managed browser profiles
 ✅ **Clean API** - Simple REST endpoints for move automation
-✅ **No separate browser** - Uses your existing Chrome window
+✅ **No separate browser** - Uses your existing Edge window
 
 ## Architecture
 
@@ -25,10 +25,10 @@ This version uses Chrome's remote debugging protocol to connect to your already-
 │  Engine Bridge  │─────▶│   API Server     │
 │  (optional)     │ HTTP │  (localhost:3000)│
 └─────────────────┘      └────────┬─────────┘
-                                  │ Chrome DevTools Protocol
+                                  │ Edge DevTools Protocol
                                   ▼
                          ┌──────────────────┐
-                         │  Chrome Browser  │
+                         │  Edge Browser    │
                          │  (your profile)  │
                          │                  │
                          │  ┌─────────────┐ │
@@ -46,40 +46,40 @@ This version uses Chrome's remote debugging protocol to connect to your already-
 npm install
 ```
 
-### Step 2: Start Chrome with Remote Debugging
+### Step 2: Start Edge with Remote Debugging
 
-**Option A: Use the helper script (Recommended)**
-```bash
-./start-chrome.sh
+**Option A: Use the helper script (Recommended for Windows)**
+```powershell
+.\start-edge.ps1
 ```
 
 **Option B: Manual start**
 
+Windows:
+```powershell
+& "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe" `
+  --remote-debugging-port=9223 `
+  --user-data-dir="$env:LOCALAPPDATA\Microsoft\Edge\User Data"
+```
+
 Linux:
 ```bash
-google-chrome --remote-debugging-port=9222 \
-  --user-data-dir="$HOME/.config/google-chrome/Default"
+microsoft-edge --remote-debugging-port=9223 \
+  --user-data-dir="$HOME/.config/microsoft-edge/Default"
 ```
 
 macOS:
 ```bash
-"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
-  --remote-debugging-port=9222 \
-  --user-data-dir="$HOME/Library/Application Support/Google/Chrome/Default"
+"/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge" \
+  --remote-debugging-port=9223 \
+  --user-data-dir="$HOME/Library/Application Support/Microsoft Edge/Default"
 ```
 
-Windows:
-```cmd
-"C:\Program Files\Google\Chrome\Application\chrome.exe" ^
-  --remote-debugging-port=9222 ^
-  --user-data-dir="%USERPROFILE%\AppData\Local\Google\Chrome\User Data\Default"
-```
-
-**Note:** Adjust `--user-data-dir` to point to YOUR Chrome profile path.
+**Note:** Adjust `--user-data-dir` to point to YOUR Edge profile path.
 
 ### Step 3: Navigate to Chess.com
 
-1. In the Chrome window that just opened, go to https://www.chess.com
+1. In the Edge window that just opened, go to https://www.chess.com
 2. Log in (if not already logged in)
 3. Navigate to https://www.chess.com/play/computer
 4. Start a game against a bot
@@ -214,17 +214,17 @@ await fetch('http://localhost:3000/move', {
 
 ### "Not connected to browser"
 
-**Problem:** API server can't find Chrome
+**Problem:** API server can't find Edge
 **Solution:**
-1. Make sure Chrome is running with `--remote-debugging-port=9222`
-2. Check that chrome is on port 9222: `curl http://localhost:9222/json`
-3. Restart Chrome with the correct flags
+1. Make sure Edge is running with `--remote-debugging-port=9223`
+2. Check that Edge is on port 9223: `curl http://localhost:9223/json`
+3. Restart Edge with the correct flags or use the start-edge.ps1 script
 
 ### "No chess.com tab found"
 
 **Problem:** No chess.com page is open
 **Solution:**
-1. Navigate to https://www.chess.com in the Chrome window
+1. Navigate to https://www.chess.com in the Edge window
 2. Restart the API server (it will re-scan for tabs)
 
 ### Moves not executing
@@ -236,77 +236,77 @@ await fetch('http://localhost:3000/move', {
 3. Verify the move is legal
 4. Check console output for errors
 
-### Chrome profile issues
+### Edge profile issues
 
 **Problem:** Can't access your existing profile
 **Solution:**
-1. Close all Chrome windows first
+1. Close all Edge windows first
 2. Find your profile path:
-   - Linux: `~/.config/google-chrome/Default` or `Profile 1`, `Profile 2`, etc.
-   - macOS: `~/Library/Application Support/Google/Chrome/Default`
-   - Windows: `%USERPROFILE%\AppData\Local\Google\Chrome\User Data\Default`
+   - Linux: `~/.config/microsoft-edge/Default` or `Profile 1`, `Profile 2`, etc.
+   - macOS: `~/Library/Application Support/Microsoft Edge/Default`
+   - Windows: `%LOCALAPPDATA%\Microsoft\Edge\User Data\Default`
 3. Use the exact path in `--user-data-dir`
 
 ### Port already in use
 
-**Problem:** Port 9222 or 3000 already in use
+**Problem:** Port 9223 or 3000 already in use
 **Solution:**
 ```bash
-# Find process using port 9222
-lsof -i :9222
+# Find process using port 9223
+lsof -i :9223
 # Kill it
 kill -9 <PID>
 
-# Or change the port in api-server.js (line 9)
+# Or change the port in api-server.js (line 14)
 ```
 
-## Finding Your Chrome Profile
+## Finding Your Edge Profile
 
 ### Linux
 ```bash
-ls ~/.config/google-chrome/
+ls ~/.config/microsoft-edge/
 # Look for: Default, Profile 1, Profile 2, etc.
 ```
 
 ### macOS
 ```bash
-ls ~/Library/Application\ Support/Google/Chrome/
+ls ~/Library/Application\ Support/Microsoft\ Edge/
 # Look for: Default, Profile 1, Profile 2, etc.
 ```
 
 ### Windows
 ```cmd
-dir "%USERPROFILE%\AppData\Local\Google\Chrome\User Data"
+dir "%LOCALAPPDATA%\Microsoft\Edge\User Data"
 REM Look for: Default, Profile 1, Profile 2, etc.
 ```
 
 To identify which profile:
-1. Open Chrome normally
-2. Go to `chrome://version/`
+1. Open Edge normally
+2. Go to `edge://version/`
 3. Look at "Profile Path"
 
 ## Advanced Usage
 
 ### Using with Multiple Profiles
 
-If you have multiple Chrome profiles:
+If you have multiple Edge profiles:
 
 ```bash
-# List profiles
-ls ~/.config/google-chrome/
+# List profiles (Windows)
+dir "%LOCALAPPDATA%\Microsoft\Edge\User Data"
 
-# Start with specific profile
-google-chrome --remote-debugging-port=9222 \
-  --user-data-dir="$HOME/.config/google-chrome/Profile 2"
+# Start with specific profile (Windows)
+msedge.exe --remote-debugging-port=9223 `
+  --user-data-dir="$env:LOCALAPPDATA\Microsoft\Edge\User Data\Profile 2"
 ```
 
 ### Running Headless
 
-You can run Chrome in headless mode (no UI):
+You can run Edge in headless mode (no UI):
 
 ```bash
-google-chrome --remote-debugging-port=9222 \
-  --user-data-dir="/tmp/chrome-profile" \
+msedge.exe --remote-debugging-port=9223 \
+  --user-data-dir="/tmp/edge-profile" \
   --headless=new
 ```
 
@@ -316,7 +316,7 @@ google-chrome --remote-debugging-port=9222 \
 
 To see what tabs are available:
 ```bash
-curl http://localhost:9222/json
+curl http://localhost:9223/json
 ```
 
 To see API server logs:
@@ -330,9 +330,9 @@ npm start
 ⚠️ **Important Security Notes:**
 
 1. **Local Network Only:** The API server runs on localhost (127.0.0.1) and should NOT be exposed to the internet
-2. **Chrome Debugging Port:** Port 9222 gives full control of your browser. Don't expose it publicly.
-3. **Same Machine:** Both Chrome and the API server should run on the same machine
-4. **Firewall:** If using a firewall, only allow localhost connections to ports 9222 and 3000
+2. **Edge Debugging Port:** Port 9223 gives full control of your browser. Don't expose it publicly.
+3. **Same Machine:** Both Edge and the API server should run on the same machine
+4. **Firewall:** If using a firewall, only allow localhost connections to ports 9223 and 3000
 
 ## Comparison with Old Approach
 

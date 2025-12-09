@@ -3,9 +3,9 @@
     "port": 3000,
     "host": "localhost"
   },
-  "chrome": {
-    "debugPort": 9222,
-    "debugUrl": "http://localhost:9222"
+  "edge": {
+    "debugPort": 9223,
+    "debugUrl": "http://localhost:9223"
   },
   "engine": {
     "path": "/home/user/Wilted-Chess-Engine/bin/wilted",
