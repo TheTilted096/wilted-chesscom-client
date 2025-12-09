@@ -1,0 +1,21 @@
+{
+  "apiServer": {
+    "port": 3000,
+    "host": "localhost"
+  },
+  "chrome": {
+    "debugPort": 9222,
+    "debugUrl": "http://localhost:9222"
+  },
+  "engine": {
+    "path": "/home/user/Wilted-Chess-Engine/bin/wilted",
+    "threads": 8,
+    "moveTime": 60000,
+    "increment": 1000
+  },
+  "game": {
+    "autoConnect": true,
+    "waitForGame": true,
+    "pollInterval": 500
+  }
+}
