@@ -115,6 +115,17 @@ export class UCIEngine extends EventEmitter {
   }
 
   /**
+   * Update thread count
+   * @param {number} threads - Number of threads
+   */
+  async setThreads(threads) {
+    this.options.threads = threads;
+    this.send(`setoption name Threads value ${threads}`);
+    console.log(`  Threads updated: ${threads}`);
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+
+  /**
    * Start a new game
    */
   newGame() {
@@ -145,11 +156,12 @@ export class UCIEngine extends EventEmitter {
    * @param {number} btime - Black's remaining time in ms
    * @param {number} winc - White's increment in ms
    * @param {number} binc - Black's increment in ms
-   * @returns {Promise<{move: string, ponder: string}>}
+   * @returns {Promise<{move: string, ponder: string, timeUsed: number}>}
    */
   async go(wtime, btime, winc, binc) {
     return new Promise((resolve, reject) => {
       this.thinking = true;
+      const startTime = Date.now();
 
       // Build go command
       let command = 'go';
@@ -169,14 +181,16 @@ export class UCIEngine extends EventEmitter {
       const onBestMove = (line) => {
         if (line.startsWith('bestmove')) {
           this.thinking = false;
+          const endTime = Date.now();
+          const timeUsed = endTime - startTime;
 
           const parts = line.split(' ');
           const move = parts[1];
           const ponder = parts[3]; // May be undefined
 
-          console.log(`✓ Engine suggests: ${move}`);
+          console.log(`✓ Engine suggests: ${move} (took ${timeUsed}ms)`);
 
-          resolve({ move, ponder });
+          resolve({ move, ponder, timeUsed });
         }
       };
 

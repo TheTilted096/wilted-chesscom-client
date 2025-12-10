@@ -123,21 +123,64 @@ async function switchEngine(engineName) {
   }
 }
 
-async function configEngine(nodes) {
+async function configEngine(args) {
   try {
-    if (!nodes) {
-      console.log('❌ Usage: config <nodes>');
+    if (!args || args.length === 0) {
+      console.log('❌ Usage:');
+      console.log('   config mode <nodes|time>');
+      console.log('   config nodes <number>');
+      console.log('   config time <base> <increment> [threads]');
       return;
     }
 
-    const body = { nodes: parseInt(nodes) };
+    const subcommand = args[0];
+    let body = {};
+
+    if (subcommand === 'mode') {
+      const mode = args[1];
+      if (!mode || (mode !== 'nodes' && mode !== 'time')) {
+        console.log('❌ Mode must be "nodes" or "time"');
+        return;
+      }
+      body = { mode };
+    } else if (subcommand === 'nodes') {
+      const nodes = parseInt(args[1]);
+      if (isNaN(nodes)) {
+        console.log('❌ Invalid node count');
+        return;
+      }
+      body = { nodes };
+    } else if (subcommand === 'time') {
+      const base = parseInt(args[1]);
+      const increment = parseInt(args[2]);
+      const threads = args[3] ? parseInt(args[3]) : undefined;
+
+      if (isNaN(base) || isNaN(increment)) {
+        console.log('❌ Invalid time control values');
+        return;
+      }
+
+      body = { timeControl: { base, increment } };
+      if (threads !== undefined && !isNaN(threads)) {
+        body.timeControl.threads = threads;
+      }
+    } else {
+      console.log('❌ Unknown subcommand. Use: mode, nodes, or time');
+      return;
+    }
 
     console.log('\n⚙️  Configuring engine...');
     const result = await apiRequest('POST', '/engine/config', body);
 
     if (result.success) {
       console.log('✓ Configuration updated');
-      console.log(`   Nodes: ${result.config.nodes}`);
+      console.log(`   Mode: ${result.config.mode}`);
+      console.log(`   Threads: ${result.config.threads}`);
+      if (result.config.mode === 'nodes') {
+        console.log(`   Nodes: ${result.config.nodes}`);
+      } else {
+        console.log(`   Time control: ${result.config.timeControl.base}ms + ${result.config.timeControl.increment}ms`);
+      }
       console.log(`   Engine: ${result.config.selectedEngine || 'none'}`);
     } else {
       console.log('❌ Failed:', result.error);
@@ -155,7 +198,21 @@ async function engineStatus() {
     console.log(`   Ready: ${result.engineReady ? 'Yes' : 'No'}`);
     console.log(`   Thinking: ${result.thinking ? 'Yes' : 'No'}`);
     console.log(`   Selected: ${result.selectedEngine || 'none'}`);
-    console.log(`   Nodes: ${result.config.nodes}`);
+    console.log(`\n   Configuration:`);
+    console.log(`   Mode: ${result.config.mode}`);
+    console.log(`   Threads: ${result.config.threads}`);
+
+    if (result.config.mode === 'nodes') {
+      console.log(`   Nodes: ${result.config.nodes}`);
+    } else {
+      console.log(`   Time control: ${result.config.timeControl.base}ms + ${result.config.timeControl.increment}ms`);
+      if (result.timeTracking) {
+        console.log(`\n   Time Tracking:`);
+        console.log(`   White: ${result.timeTracking.whiteTime}ms`);
+        console.log(`   Black: ${result.timeTracking.blackTime}ms`);
+        console.log(`   Increment: ${result.timeTracking.increment}ms`);
+      }
+    }
 
     if (result.availableEngines && result.availableEngines.length > 0) {
       console.log('\n   Available Engines:');
@@ -377,7 +434,9 @@ async function main() {
   console.log('    enable [name]  - Enable engine (auto-select if no name)');
   console.log('    disable        - Disable engine');
   console.log('    switch <name>  - Switch to different engine');
-  console.log('    config <nodes>     - Configure engine');
+  console.log('    config mode <nodes|time>        - Switch engine mode');
+  console.log('    config nodes <number>           - Set node limit');
+  console.log('    config time <base> <inc> [thr]  - Set time control');
   console.log('    estatus        - Show engine status');
   console.log('    suggest        - Get engine move suggestion');
   console.log('');
@@ -425,7 +484,9 @@ async function main() {
         console.log('    enable [name]  - Enable engine (auto-select if no name)');
         console.log('    disable        - Disable engine');
         console.log('    switch <name>  - Switch to different engine');
-        console.log('    config <nodes>     - Configure engine');
+        console.log('    config mode <nodes|time>        - Switch engine mode');
+        console.log('    config nodes <number>           - Set node limit');
+        console.log('    config time <base> <inc> [thr]  - Set time control');
         console.log('    estatus        - Show engine status');
         console.log('    suggest        - Get engine move suggestion');
         console.log('');
@@ -469,10 +530,13 @@ async function main() {
           console.log('❌ Usage: switch <engine-name>');
         }
       } else if (command === 'config') {
-        if (parts[1]) {
-          await configEngine(parts[1]);
+        if (parts.length > 1) {
+          await configEngine(parts.slice(1));
         } else {
-          console.log('❌ Usage: config <nodes>');
+          console.log('❌ Usage:');
+          console.log('   config mode <nodes|time>');
+          console.log('   config nodes <number>');
+          console.log('   config time <base> <increment> [threads]');
         }
       } else if (command === 'estatus') {
         await engineStatus();

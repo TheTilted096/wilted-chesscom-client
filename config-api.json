@@ -8,8 +8,14 @@
     "debugUrl": "http://localhost:9223"
   },
   "engine": {
-    "threads": 1,
+    "mode": "nodes",
     "nodes": 1000000,
+    "threads": 1,
+    "timeControl": {
+      "base": 60000,
+      "increment": 1000,
+      "threads": 8
+    },
     "moveTime": 60000,
     "increment": 1000
   },
