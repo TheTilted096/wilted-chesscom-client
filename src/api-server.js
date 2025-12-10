@@ -85,16 +85,13 @@ function discoverEngines() {
       try {
         const stats = statSync(fullPath);
 
-        // Check if it's a file and executable
+        // Check if it's a file
         if (stats.isFile() && file !== '.gitkeep') {
-          // On Unix, check if executable bit is set
-          const isExecutable = process.platform === 'win32' || (stats.mode & 0o111) !== 0;
-
           engines.push({
             name: file,
             path: fullPath,
             size: stats.size,
-            executable: isExecutable,
+            executable: true,
             modified: stats.mtime
           });
         }

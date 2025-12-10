@@ -42,40 +42,25 @@ This version uses Edge's remote debugging protocol to connect to your already-lo
 
 ### Step 1: Install Dependencies
 
-```bash
+```powershell
 npm install
 ```
 
 ### Step 2: Start Edge with Remote Debugging
 
-**Option A: Use the helper script (Recommended for Windows)**
+**Option A: Use the helper script (Recommended)**
 ```powershell
 .\start-edge.ps1
 ```
 
 **Option B: Manual start**
-
-Windows:
 ```powershell
 & "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe" `
   --remote-debugging-port=9223 `
   --user-data-dir="$env:LOCALAPPDATA\Microsoft\Edge\User Data"
 ```
 
-Linux:
-```bash
-microsoft-edge --remote-debugging-port=9223 \
-  --user-data-dir="$HOME/.config/microsoft-edge/Default"
-```
-
-macOS:
-```bash
-"/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge" \
-  --remote-debugging-port=9223 \
-  --user-data-dir="$HOME/Library/Application Support/Microsoft Edge/Default"
-```
-
-**Note:** Adjust `--user-data-dir` to point to YOUR Edge profile path.
+**Note:** Adjust `--user-data-dir` to point to YOUR Edge profile path if needed.
 
 ### Step 3: Navigate to Chess.com
 
@@ -87,7 +72,7 @@ macOS:
 ### Step 4: Start the API Server
 
 In a new terminal:
-```bash
+```powershell
 npm start
 ```
 
@@ -101,16 +86,14 @@ You should see:
 ### Step 5: Test the API
 
 In another terminal:
-```bash
+```powershell
 npm test
 ```
 
 Or use curl:
-```bash
+```powershell
 # Make a move
-curl -X POST http://localhost:3000/move \
-  -H "Content-Type: application/json" \
-  -d '{"move": "e2e4"}'
+curl -X POST http://localhost:3000/move -H "Content-Type: application/json" -d '{"move":"e2e4"}'
 
 # Get board state
 curl http://localhost:3000/board
@@ -190,20 +173,17 @@ The API server now includes built-in support for UCI chess engines! You can drop
 ### Quick Setup
 
 1. **Create engines directory** (if not exists):
-   ```bash
+   ```powershell
    mkdir engines
    ```
 
 2. **Add your chess engines**:
-   ```bash
+   ```powershell
    # Example: Copy Stockfish
-   cp /path/to/stockfish engines/stockfish
+   copy C:\path\to\stockfish.exe engines\stockfish.exe
 
    # Example: Copy your custom engine
-   cp /path/to/wilted engines/wilted
-
-   # Make them executable (Linux/Mac)
-   chmod +x engines/*
+   copy C:\path\to\wilted.exe engines\wilted.exe
    ```
 
 3. **Start the server** and the API will auto-discover all engines!
@@ -393,7 +373,7 @@ Get the engine's suggested move for the current board position.
 
 ### Example: Engine-Assisted Play
 
-```bash
+```powershell
 # 1. List available engines
 curl http://localhost:3000/engine/list
 # Returns: {"engines": [{"name": "stockfish", ...}, {"name": "wilted", ...}]}
@@ -402,28 +382,20 @@ curl http://localhost:3000/engine/list
 curl -X POST http://localhost:3000/engine/enable
 
 # Or select a specific engine
-curl -X POST http://localhost:3000/engine/enable \
-  -H "Content-Type: application/json" \
-  -d '{"engine": "stockfish"}'
+curl -X POST http://localhost:3000/engine/enable -H "Content-Type: application/json" -d '{"engine":"stockfish"}'
 
 # 3. Get engine's suggested move
 curl http://localhost:3000/engine/suggest
 # Returns: {"move": "e2e4", ...}
 
 # 4. Execute the move
-curl -X POST http://localhost:3000/move \
-  -H "Content-Type: application/json" \
-  -d '{"move": "e2e4"}'
+curl -X POST http://localhost:3000/move -H "Content-Type: application/json" -d '{"move":"e2e4"}'
 
 # 5. Switch to a different engine
-curl -X POST http://localhost:3000/engine/switch \
-  -H "Content-Type: application/json" \
-  -d '{"engine": "wilted"}'
+curl -X POST http://localhost:3000/engine/switch -H "Content-Type: application/json" -d '{"engine":"wilted"}'
 
 # 6. Configure engine for deeper search
-curl -X POST http://localhost:3000/engine/config \
-  -H "Content-Type: application/json" \
-  -d '{"nodes": 5000000, "threads": 8}'
+curl -X POST http://localhost:3000/engine/config -H "Content-Type: application/json" -d '{"nodes":5000000,"threads":8}'
 
 # 7. Get next suggestion with new settings
 curl http://localhost:3000/engine/suggest
@@ -505,46 +477,33 @@ await fetch('http://localhost:3000/move', {
 **Problem:** Can't access your existing profile
 **Solution:**
 1. Close all Edge windows first
-2. Find your profile path:
-   - Linux: `~/.config/microsoft-edge/Default` or `Profile 1`, `Profile 2`, etc.
-   - macOS: `~/Library/Application Support/Microsoft Edge/Default`
-   - Windows: `%LOCALAPPDATA%\Microsoft\Edge\User Data\Default`
+2. Find your profile path: `%LOCALAPPDATA%\Microsoft\Edge\User Data\Default`
+   - Or check for `Profile 1`, `Profile 2`, etc.
 3. Use the exact path in `--user-data-dir`
 
 ### Port already in use
 
 **Problem:** Port 9223 or 3000 already in use
 **Solution:**
-```bash
+```powershell
 # Find process using port 9223
-lsof -i :9223
-# Kill it
-kill -9 <PID>
+netstat -ano | findstr :9223
 
-# Or change the port in api-server.js (line 14)
+# Kill it (replace PID with actual process ID)
+taskkill /PID <PID> /F
+
+# Or change the port in config-api.json
 ```
 
 ## Finding Your Edge Profile
 
-### Linux
-```bash
-ls ~/.config/microsoft-edge/
-# Look for: Default, Profile 1, Profile 2, etc.
-```
-
-### macOS
-```bash
-ls ~/Library/Application\ Support/Microsoft\ Edge/
-# Look for: Default, Profile 1, Profile 2, etc.
-```
-
-### Windows
+List available profiles:
 ```cmd
 dir "%LOCALAPPDATA%\Microsoft\Edge\User Data"
 REM Look for: Default, Profile 1, Profile 2, etc.
 ```
 
-To identify which profile:
+To identify which profile you're currently using:
 1. Open Edge normally
 2. Go to `edge://version/`
 3. Look at "Profile Path"
@@ -555,12 +514,13 @@ To identify which profile:
 
 If you have multiple Edge profiles:
 
-```bash
-# List profiles (Windows)
-dir "%LOCALAPPDATA%\Microsoft\Edge\User Data"
+```powershell
+# List profiles
+dir "$env:LOCALAPPDATA\Microsoft\Edge\User Data"
 
-# Start with specific profile (Windows)
-msedge.exe --remote-debugging-port=9223 `
+# Start with specific profile
+& "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe" `
+  --remote-debugging-port=9223 `
   --user-data-dir="$env:LOCALAPPDATA\Microsoft\Edge\User Data\Profile 2"
 ```
 
@@ -568,9 +528,10 @@ msedge.exe --remote-debugging-port=9223 `
 
 You can run Edge in headless mode (no UI):
 
-```bash
-msedge.exe --remote-debugging-port=9223 \
-  --user-data-dir="/tmp/edge-profile" \
+```powershell
+& "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe" `
+  --remote-debugging-port=9223 `
+  --user-data-dir="$env:TEMP\edge-profile" `
   --headless=new
 ```
 
@@ -579,12 +540,12 @@ msedge.exe --remote-debugging-port=9223 \
 ### Debugging
 
 To see what tabs are available:
-```bash
+```powershell
 curl http://localhost:9223/json
 ```
 
 To see API server logs:
-```bash
+```powershell
 npm start
 # Watch the console output for errors
 ```
@@ -612,8 +573,7 @@ npm start
 ## What's Next?
 
 - See `src/engine-bridge.js` for full UCI engine integration
-- Check `config.json` for customization options
-- Read the main README.md for the old Puppeteer-based approach
+- Check `config-api.json` for customization options
 
 ## License
 
