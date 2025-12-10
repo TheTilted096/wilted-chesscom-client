@@ -52,8 +52,22 @@ let autoplayColor = 'white'; // 'white' or 'black'
 let autoplayInterval = null;
 let autoplayBusy = false; // Prevent concurrent autoplay actions
 let engineConfig = {
+  mode: config.engine?.mode || 'nodes', // 'nodes' or 'time'
   nodes: config.engine?.nodes || 1000000,
+  threads: config.engine?.threads || 1,
+  timeControl: {
+    base: config.engine?.timeControl?.base || 60000,
+    increment: config.engine?.timeControl?.increment || 1000,
+    threads: config.engine?.timeControl?.threads || 8
+  },
   selectedEngine: null // Currently selected engine name
+};
+
+// Time tracking for time control mode
+let timeTracking = {
+  whiteTime: engineConfig.timeControl.base,
+  blackTime: engineConfig.timeControl.base,
+  increment: engineConfig.timeControl.increment
 };
 
 const ENGINES_DIR = './engines';
@@ -644,10 +658,35 @@ async function autoplayLoop() {
     console.log('   Setting position...');
     engine.setPosition('startpos', moveHistory);
 
-    // Get best move
-    console.log(`   Calculating (${engineConfig.nodes} nodes)...`);
-    const result = await engine.goNodes(engineConfig.nodes);
-    const bestMove = result.move;
+    // Get best move based on mode
+    let result;
+    let bestMove;
+
+    if (engineConfig.mode === 'nodes') {
+      console.log(`   Calculating (${engineConfig.nodes} nodes, 1 thread)...`);
+      result = await engine.goNodes(engineConfig.nodes);
+      bestMove = result.move;
+    } else {
+      // Time control mode
+      console.log(`   Calculating (time control: ${timeTracking.whiteTime}ms + ${timeTracking.increment}ms, ${engineConfig.timeControl.threads} threads)...`);
+      result = await engine.go(
+        timeTracking.whiteTime,
+        timeTracking.blackTime,
+        timeTracking.increment,
+        timeTracking.increment
+      );
+      bestMove = result.move;
+      const timeUsed = result.timeUsed;
+
+      // Update time tracking
+      if (autoplayColor === 'white') {
+        timeTracking.whiteTime = timeTracking.whiteTime - timeUsed + timeTracking.increment;
+        console.log(`   ⏱️  White time used: ${timeUsed}ms, remaining: ${timeTracking.whiteTime}ms`);
+      } else {
+        timeTracking.blackTime = timeTracking.blackTime - timeUsed + timeTracking.increment;
+        console.log(`   ⏱️  Black time used: ${timeUsed}ms, remaining: ${timeTracking.blackTime}ms`);
+      }
+    }
 
     console.log(`   ✓ Engine suggests: ${bestMove}`);
 
@@ -989,6 +1028,14 @@ app.post('/reset', async (req, res) => {
     console.log('🔄 Position reset');
     console.log(`   Cleared ${previousMoveCount} moves from history`);
 
+    // Reset time tracking for time control mode
+    if (engineConfig.mode === 'time') {
+      timeTracking.whiteTime = engineConfig.timeControl.base;
+      timeTracking.blackTime = engineConfig.timeControl.base;
+      timeTracking.increment = engineConfig.timeControl.increment;
+      console.log('   ✓ Time tracking reset');
+    }
+
     // Send ucinewgame to engine if it's enabled
     if (engineEnabled && engine && engine.isReady()) {
       console.log('   Sending ucinewgame to engine...');
@@ -1003,6 +1050,7 @@ app.post('/reset', async (req, res) => {
       message: 'Move history reset',
       previousMoveCount,
       engineReset: engineEnabled && engine && engine.isReady(),
+      timeTrackingReset: engineConfig.mode === 'time',
       timestamp: new Date().toISOString()
     });
   } catch (error) {
@@ -1474,11 +1522,19 @@ app.post('/engine/enable', async (req, res) => {
     console.log('🤖 Starting chess engine...');
     console.log(`   Engine: ${selectedEngineName}`);
     console.log(`   Path: ${enginePath}`);
-    console.log(`   Node limit: ${engineConfig.nodes}`);
+    console.log(`   Mode: ${engineConfig.mode}`);
+    if (engineConfig.mode === 'nodes') {
+      console.log(`   Node limit: ${engineConfig.nodes}`);
+      console.log(`   Threads: 1 (fixed for nodes mode)`);
+    } else {
+      console.log(`   Time control: ${engineConfig.timeControl.base}ms + ${engineConfig.timeControl.increment}ms`);
+      console.log(`   Threads: ${engineConfig.timeControl.threads}`);
+    }
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 
-    // Create and start engine
-    engine = new UCIEngine(enginePath);
+    // Create and start engine with appropriate thread count
+    const threads = engineConfig.mode === 'nodes' ? 1 : engineConfig.timeControl.threads;
+    engine = new UCIEngine(enginePath, { threads });
 
     await engine.start();
     engineEnabled = true;
@@ -1621,32 +1677,67 @@ app.post('/engine/switch', async (req, res) => {
 // Configure engine
 app.post('/engine/config', async (req, res) => {
   try {
-    const { nodes } = req.body;
+    const { mode, nodes, threads, timeControl } = req.body;
 
-    if (nodes === undefined) {
-      return res.status(400).json({
-        success: false,
-        error: 'Node limit required. Provide { "nodes": 1000000 }'
-      });
+    // Update mode if provided
+    if (mode !== undefined) {
+      if (mode !== 'nodes' && mode !== 'time') {
+        return res.status(400).json({
+          success: false,
+          error: 'Mode must be "nodes" or "time"'
+        });
+      }
+      engineConfig.mode = mode;
+      console.log(`✓ Mode updated: ${engineConfig.mode}`);
+
+      // Update threads based on mode
+      if (engineEnabled && engine) {
+        const newThreads = mode === 'nodes' ? 1 : engineConfig.timeControl.threads;
+        await engine.setThreads(newThreads);
+      }
     }
 
-    const wasEnabled = engineEnabled;
+    // Update nodes if provided (for nodes mode)
+    if (nodes !== undefined) {
+      engineConfig.nodes = parseInt(nodes);
+      console.log(`✓ Node limit updated: ${engineConfig.nodes}`);
+    }
 
-    // Update configuration
-    engineConfig.nodes = parseInt(nodes);
-    console.log(`✓ Node limit updated: ${engineConfig.nodes}`);
+    // Update time control settings if provided
+    if (timeControl !== undefined) {
+      if (timeControl.base !== undefined) {
+        engineConfig.timeControl.base = parseInt(timeControl.base);
+        timeTracking.whiteTime = engineConfig.timeControl.base;
+        timeTracking.blackTime = engineConfig.timeControl.base;
+        console.log(`✓ Time control base updated: ${engineConfig.timeControl.base}ms`);
+      }
+      if (timeControl.increment !== undefined) {
+        engineConfig.timeControl.increment = parseInt(timeControl.increment);
+        timeTracking.increment = engineConfig.timeControl.increment;
+        console.log(`✓ Time control increment updated: ${engineConfig.timeControl.increment}ms`);
+      }
+      if (timeControl.threads !== undefined) {
+        engineConfig.timeControl.threads = parseInt(timeControl.threads);
+        console.log(`✓ Time control threads updated: ${engineConfig.timeControl.threads}`);
 
-    // If engine is running and was enabled, it will use the new nodes on next search
-    // No need to restart the engine
+        // If in time mode and engine is running, update threads
+        if (engineConfig.mode === 'time' && engineEnabled && engine) {
+          await engine.setThreads(engineConfig.timeControl.threads);
+        }
+      }
+    }
 
     res.json({
       success: true,
       message: 'Engine configuration updated',
       config: {
+        mode: engineConfig.mode,
         nodes: engineConfig.nodes,
+        threads: engineConfig.mode === 'nodes' ? 1 : engineConfig.timeControl.threads,
+        timeControl: engineConfig.timeControl,
         selectedEngine: engineConfig.selectedEngine
       },
-      engineEnabled: wasEnabled
+      engineEnabled: engineEnabled
     });
   } catch (error) {
     console.error('❌ Failed to configure engine:', error.message);
@@ -1667,8 +1758,16 @@ app.get('/engine/status', (req, res) => {
     thinking: engine ? engine.thinking : false,
     selectedEngine: engineConfig.selectedEngine,
     config: {
-      nodes: engineConfig.nodes
+      mode: engineConfig.mode,
+      nodes: engineConfig.nodes,
+      threads: engineConfig.mode === 'nodes' ? 1 : engineConfig.timeControl.threads,
+      timeControl: engineConfig.timeControl
     },
+    timeTracking: engineConfig.mode === 'time' ? {
+      whiteTime: timeTracking.whiteTime,
+      blackTime: timeTracking.blackTime,
+      increment: timeTracking.increment
+    } : undefined,
     availableEngines: availableEngines.map(e => ({
       name: e.name,
       executable: e.executable,
@@ -1709,22 +1808,51 @@ app.get('/engine/suggest', async (req, res) => {
     // Set position for engine using move history
     engine.setPosition('startpos', moveHistory);
 
-    // Get best move using node limit
-    console.log(`   Searching with ${engineConfig.nodes} nodes...`);
-    const result = await engine.goNodes(engineConfig.nodes);
+    // Get best move based on mode
+    let result;
+    if (engineConfig.mode === 'nodes') {
+      console.log(`   Searching with ${engineConfig.nodes} nodes (1 thread)...`);
+      result = await engine.goNodes(engineConfig.nodes);
+    } else {
+      // Time control mode
+      console.log(`   Searching with time control: ${timeTracking.whiteTime}ms + ${timeTracking.increment}ms (${engineConfig.timeControl.threads} threads)...`);
+      result = await engine.go(
+        timeTracking.whiteTime,
+        timeTracking.blackTime,
+        timeTracking.increment,
+        timeTracking.increment
+      );
+
+      if (result.timeUsed) {
+        console.log(`   ⏱️  Time used: ${result.timeUsed}ms`);
+      }
+    }
 
     console.log(`✓ Engine suggests: ${result.move}`);
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 
-    res.json({
+    const responseData = {
       success: true,
       move: result.move,
       ponder: result.ponder,
       fen,
       moveHistory,
-      nodes: engineConfig.nodes,
+      mode: engineConfig.mode,
       timestamp: new Date().toISOString()
-    });
+    };
+
+    if (engineConfig.mode === 'nodes') {
+      responseData.nodes = engineConfig.nodes;
+    } else {
+      responseData.timeUsed = result.timeUsed;
+      responseData.timeControl = {
+        whiteTime: timeTracking.whiteTime,
+        blackTime: timeTracking.blackTime,
+        increment: timeTracking.increment
+      };
+    }
+
+    res.json(responseData);
   } catch (error) {
     console.error('❌ Error getting engine suggestion:', error.message);
     res.status(500).json({
