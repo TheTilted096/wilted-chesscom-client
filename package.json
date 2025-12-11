@@ -5,7 +5,8 @@
   "main": "src/api-server.js",
   "type": "module",
   "scripts": {
-    "start": "node src/api-server.js",
+    "start": "powershell -ExecutionPolicy Bypass -File ./start.ps1",
+    "start:api": "node src/api-server.js",
     "engine": "node src/engine-bridge.js",
     "test": "node src/test-api.js"
   },

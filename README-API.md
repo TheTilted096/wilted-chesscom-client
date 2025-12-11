@@ -46,51 +46,64 @@ This version uses Edge's remote debugging protocol to connect to your already-lo
 npm install
 ```
 
-### Step 2: Start Edge with Remote Debugging
+### Step 2: Start Everything (One Command!)
 
-**Option A: Use the helper script (Recommended)**
-```powershell
-.\start-edge.ps1
-```
-
-**Option B: Manual start**
-```powershell
-& "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe" `
-  --remote-debugging-port=9223 `
-  --user-data-dir="$env:LOCALAPPDATA\Microsoft\Edge\User Data"
-```
-
-**Note:** Adjust `--user-data-dir` to point to YOUR Edge profile path if needed.
-
-### Step 3: Navigate to Chess.com
-
-1. In the Edge window that just opened, go to https://www.chess.com
-2. Log in (if not already logged in)
-3. Navigate to https://www.chess.com/play/computer
-4. Start a game against a bot
-
-### Step 4: Start the API Server
-
-In a new terminal:
 ```powershell
 npm start
 ```
 
+This single command will:
+- Close any existing Edge processes
+- Launch Edge with debugging on port 9223
+- Navigate to chess.com automatically
+- Start the API server on port 3000
+- Open the interactive test client
+
 You should see:
 ```
-✓ API Server running on http://localhost:3000
-✓ Connected to chess.com tab
-✓ Ready!
+=========================================
+  Wilted Chess.com Client - All-in-One
+=========================================
+
+[1/4] Closing existing Edge instances...
+[2/4] Starting Edge with remote debugging...
+[3/4] Starting API server...
+[4/4] Launching interactive test client...
+
+=========================================
+  System Ready!
+=========================================
+  Edge:       Port 9223
+  API Server: http://localhost:3000
+  Test Client: Running below
+=========================================
 ```
 
-### Step 5: Test the API
+Just log in to chess.com (if needed), start a game against a bot, and you're ready to use the test client!
 
-In another terminal:
+Press `Ctrl+C` to stop all services cleanly.
+
+### Alternative: Manual Step-by-Step Setup
+
+If you prefer to run components separately:
+
+**Start Edge with Remote Debugging:**
+```powershell
+.\start-edge.ps1
+```
+
+**Start the API Server:**
+```powershell
+npm run start:api
+```
+
+**Run the Test Client:**
 ```powershell
 npm test
 ```
 
-Or use curl:
+### Quick API Test with curl
+
 ```powershell
 # Make a move
 curl -X POST http://localhost:3000/move -H "Content-Type: application/json" -d '{"move":"e2e4"}'

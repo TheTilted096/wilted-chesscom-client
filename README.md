@@ -25,55 +25,35 @@ This client uses Microsoft Edge's remote debugging protocol to control your alre
 npm install
 ```
 
-### 2. Start Edge with Remote Debugging
+### 2. Start Everything (One Command!)
 
-```powershell
-.\start-edge.ps1
-```
-
-This script will:
-- Close any existing Edge processes
-- Launch Edge with debugging enabled on port 9223
-- Use your default Edge profile
-
-### 3. Navigate to Chess.com
-
-1. In the Edge window that opened, go to https://www.chess.com
-2. Log in (if not already logged in)
-3. Navigate to https://www.chess.com/play/computer
-4. Start a game against a bot
-
-### 4. Start the API Server
-
-In a new terminal:
 ```powershell
 npm start
 ```
 
-You should see:
-```
-API Server running on http://localhost:3000
-Connected to chess.com tab
-Ready!
-```
+This single command will:
+- Close any existing Edge processes
+- Launch Edge with debugging enabled on port 9223
+- Start the API server on port 3000
+- Open the interactive test client
 
-### 5. Test the Connection
+The Edge window will automatically navigate to chess.com. Just log in (if needed), start a game against a bot, and you're ready to use the test client!
 
-In another terminal:
+When you're done, press `Ctrl+C` to stop everything cleanly.
+
+### Alternative: Run Components Separately
+
+If you need to run components individually:
+
 ```powershell
+# Just start Edge with debugging
+.\start-edge.ps1
+
+# Just start the API server
+npm run start:api
+
+# Just run the test client
 npm test
-```
-
-Or use curl:
-```powershell
-# Make a move
-curl -X POST http://localhost:3000/move -H "Content-Type: application/json" -d '{"move":"e2e4"}'
-
-# Get board state
-curl http://localhost:3000/board
-
-# Check status
-curl http://localhost:3000/status
 ```
 
 ## Configuration
