@@ -250,6 +250,42 @@ async function getSuggestion() {
   }
 }
 
+async function playEngineMove() {
+  try {
+    console.log('\n🤖 Getting engine move and executing...');
+
+    // First, get the engine suggestion
+    const suggestResult = await apiRequest('GET', '/engine/suggest');
+
+    if (!suggestResult.success) {
+      console.log('❌ Failed to get engine suggestion:', suggestResult.error);
+      return;
+    }
+
+    const move = suggestResult.move;
+    console.log(`✓ Engine suggests: ${move}`);
+    if (suggestResult.ponder) {
+      console.log(`   Ponder: ${suggestResult.ponder}`);
+    }
+
+    // Now execute the move
+    console.log(`\n➤ Executing move: ${move}`);
+    const moveResult = await apiRequest('POST', '/move', { move });
+
+    if (moveResult.success) {
+      console.log('✓ Move executed successfully');
+      console.log(`  Total moves: ${moveResult.moveHistory}`);
+    } else {
+      console.log('❌ Move execution failed:', moveResult.error);
+    }
+  } catch (error) {
+    console.log('❌ Error:', error.message);
+    if (error.message.includes('not enabled')) {
+      console.log('\n💡 Tip: Enable the engine first with: enable');
+    }
+  }
+}
+
 async function makeMove(move) {
   try {
     console.log(`\n➤ Sending move: ${move}`);
@@ -439,6 +475,7 @@ async function main() {
   console.log('    config time <base> <inc> [thr]  - Set time control');
   console.log('    estatus        - Show engine status');
   console.log('    suggest        - Get engine move suggestion');
+  console.log('    play           - Get engine move and execute it immediately');
   console.log('');
   console.log('  AUTOPLAY:');
   console.log('    auto white     - Enable autoplay as white');
@@ -489,6 +526,7 @@ async function main() {
         console.log('    config time <base> <inc> [thr]  - Set time control');
         console.log('    estatus        - Show engine status');
         console.log('    suggest        - Get engine move suggestion');
+        console.log('    play           - Get engine move and execute it immediately');
         console.log('');
         console.log('  AUTOPLAY:');
         console.log('    auto white     - Enable autoplay as white');
@@ -542,6 +580,8 @@ async function main() {
         await engineStatus();
       } else if (command === 'suggest') {
         await getSuggestion();
+      } else if (command === 'play') {
+        await playEngineMove();
       } else if (command === 'auto') {
         const subcommand = parts[1];
         if (subcommand === 'white' || subcommand === 'w') {

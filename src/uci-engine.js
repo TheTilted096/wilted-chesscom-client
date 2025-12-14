@@ -1,5 +1,7 @@
 import { spawn } from 'child_process';
 import { EventEmitter } from 'events';
+import fs from 'fs';
+import path from 'path';
 
 /**
  * UCIEngine handles communication with a UCI-compatible chess engine
@@ -23,6 +25,18 @@ export class UCIEngine extends EventEmitter {
 
     // Buffer for incomplete lines
     this.outputBuffer = '';
+
+    // Debug log file path (default to engine-debug.log in current directory)
+    this.debugLogPath = options.debugLogPath || path.join(process.cwd(), 'engine-debug.log');
+
+    // Clear debug log on startup
+    if (fs.existsSync(this.debugLogPath)) {
+      fs.unlinkSync(this.debugLogPath);
+    }
+    this.logDebug('='.repeat(80));
+    this.logDebug(`ENGINE DEBUG LOG - ${new Date().toISOString()}`);
+    this.logDebug(`Engine: ${enginePath}`);
+    this.logDebug('='.repeat(80));
   }
 
   /**
@@ -141,7 +155,15 @@ export class UCIEngine extends EventEmitter {
    * @param {string[]} moves - Array of moves in UCI format
    */
   setPosition(fen = 'startpos', moves = []) {
-    let command = `position ${fen}`;
+    let command;
+
+    // Check if using standard starting position or custom FEN
+    if (fen === 'startpos') {
+      command = 'position startpos';
+    } else {
+      // For custom FEN, UCI protocol requires "position fen <fen>"
+      command = `position fen ${fen}`;
+    }
 
     if (moves && moves.length > 0) {
       command += ` moves ${moves.join(' ')}`;
@@ -337,8 +359,24 @@ export class UCIEngine extends EventEmitter {
       throw new Error('Engine not started');
     }
 
-    console.log(`→ ${command}`);
+    // Log to debug file
+    this.logDebug(`→ ${command}`);
+
+    // Only show key commands in console
+    if (!command.startsWith('setoption') && !command.startsWith('isready')) {
+      console.log(`→ ${command}`);
+    }
+
     this.process.stdin.write(command + '\n');
+  }
+
+  /**
+   * Write to debug log file with timestamp
+   */
+  logDebug(message) {
+    const timestamp = new Date().toISOString().split('T')[1].slice(0, -1); // HH:MM:SS.mmm
+    const logLine = `[${timestamp}] ${message}\n`;
+    fs.appendFileSync(this.debugLogPath, logLine);
   }
 
   /**
@@ -364,7 +402,22 @@ export class UCIEngine extends EventEmitter {
    * Process a single line of output
    */
   processLine(line) {
-    console.log(`← ${line}`);
+    // Always log to debug file
+    this.logDebug(`← ${line}`);
+
+    // Filter console output to only show important lines
+    const shouldShowInConsole =
+      line.startsWith('bestmove') ||
+      line === 'uciok' ||
+      line === 'readyok' ||
+      (line.startsWith('info') && (
+        line.includes('depth') && line.includes('score') && line.includes('pv') ||
+        line.includes('mate')
+      ));
+
+    if (shouldShowInConsole) {
+      console.log(`← ${line}`);
+    }
 
     // Emit specific events
     if (line.startsWith('bestmove')) {

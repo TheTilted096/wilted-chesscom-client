@@ -41,6 +41,7 @@ let connected = false;
 let gameActive = false;
 let chess = new Chess();
 let moveHistory = []; // Track moves in UCI format (e2e4, e7e5, etc.)
+let startingFen = null; // If game started from custom position, store the FEN here
 
 // Engine state
 let engine = null;
@@ -468,6 +469,7 @@ async function syncPositionInternal() {
 
       if (currentBoard === startBoard) {
         console.log('   ✓ At starting position - no moves to sync');
+        startingFen = null; // Regular starting position
         return {
           synced: true,
           positionsMatch: true,
@@ -477,20 +479,27 @@ async function syncPositionInternal() {
         };
       }
 
-      // Mid-game with no extractable history
-      console.warn('   ⚠ Mid-game position with no move history');
+      // Custom starting position - store the FEN and treat as synced
+      console.log('   ℹ Custom starting position detected');
+      console.log(`   → FEN: ${currentFen}`);
+      console.log('   → Setting as starting position with no move history');
+
+      startingFen = currentFen;
+      moveHistory = [];
+      chess.load(currentFen);
+
       return {
-        synced: false,
-        error: 'Could not extract move history from mid-game position',
+        synced: true,
+        positionsMatch: true,
+        customStartingPosition: true,
         currentFen,
-        expectedFen: new Chess().fen(),
-        needsManualSync: true,
-        suggestion: 'Use POST /position to manually set the move history'
+        expectedFen: currentFen,
+        message: 'Custom starting position detected and set'
       };
     }
 
     // Get expected position from move history
-    const expectedChess = new Chess();
+    const expectedChess = startingFen ? new Chess(startingFen) : new Chess();
     for (const move of moveHistory) {
       const from = move.substring(0, 2);
       const to = move.substring(2, 4);
@@ -653,7 +662,19 @@ async function autoplayLoop() {
 
     // Set position for engine
     console.log('   Setting position...');
-    engine.setPosition('startpos', moveHistory);
+    if (startingFen) {
+      // If we have no moves yet, get and use the current FEN (with correct turn indicator)
+      if (moveHistory.length === 0) {
+        const currentFen = await getBoardState();
+        console.log(`   → Using current FEN (no moves played yet): ${currentFen}`);
+        engine.setPosition(currentFen, []);
+      } else {
+        console.log(`   → Using custom starting FEN + ${moveHistory.length} moves: ${startingFen}`);
+        engine.setPosition(startingFen, moveHistory);
+      }
+    } else {
+      engine.setPosition('startpos', moveHistory);
+    }
 
     // Get best move based on mode
     let result;
@@ -754,16 +775,37 @@ async function getBoardState() {
   if (!page) throw new Error('Not connected to browser');
 
   try {
-    // Pass moveHistory to determine side to move
-    const fen = await page.evaluate((moveCount) => {
+    // Pass context about whether we have reliable move history
+    // Only use move count if we started from standard position
+    const hasCustomStart = !!startingFen;
+    const fen = await page.evaluate(({ moveCount, hasCustomStart }) => {
       // Try to get FEN from chess.com's internal state
       try {
         // Chess.com stores game data in various places
         console.log('Checking window.gameSetup:', window.gameSetup);
         console.log('Checking window.chessGame:', window.chessGame);
 
-        if (window.gameSetup?.fen) return window.gameSetup.fen;
-        if (window.chessGame?.getFEN) return window.chessGame.getFEN();
+        // Try multiple sources for the complete FEN (including castling rights and turn)
+        // Priority 1: chessGame.getFEN() - most reliable for complete FEN
+        if (window.chessGame?.getFEN) {
+          const fen = window.chessGame.getFEN();
+          console.log('Got FEN from chessGame.getFEN():', fen);
+          return fen;
+        }
+
+        // Priority 2: Try to access game instance from global scope
+        if (typeof window.game !== 'undefined' && window.game?.getFEN) {
+          const fen = window.game.getFEN();
+          console.log('Got FEN from window.game.getFEN():', fen);
+          return fen;
+        }
+
+        // Priority 3: gameSetup.fen - used for puzzles and from-position games
+        if (window.gameSetup?.fen) {
+          const fen = window.gameSetup.fen;
+          console.log('Got FEN from gameSetup.fen:', fen);
+          return fen;
+        }
 
         // Fallback: parse from DOM
         const pieces = document.querySelectorAll('.piece');
@@ -828,16 +870,144 @@ async function getBoardState() {
           if (rank < 7) fen += '/';
         }
 
-        // Detect turn based on move count
-        // Even number of moves = white's turn, odd = black's turn
-        const turn = (moveCount % 2 === 0) ? 'w' : 'b';
+        // Detect whose turn it is
+        let turn = 'w'; // Default to white
+        let turnDetectionMethod = 'default';
 
-        return `${fen} ${turn} KQkq - 0 1`;
+        // Method 1: Use move count ONLY if we started from standard position
+        // This is reliable when we know the full game from the regular start
+        if (!hasCustomStart && moveCount !== null && moveCount >= 0) {
+          // Even number of moves = white's turn, odd = black's turn
+          turn = (moveCount % 2 === 0) ? 'w' : 'b';
+          turnDetectionMethod = 'move-count';
+        } else {
+          // Method 2: Check which player's clock is running (most reliable indicator)
+          // Look for various clock selector patterns
+          const clockSelectors = [
+            '.clock-player-turn', // Generic active clock
+            '.clock.player-turn', // Alternative pattern
+            '[class*="clock"][class*="turn"]', // Any clock with "turn" in class
+            '.clock-component.active', // Active clock component
+            '.user-tagline-username.active', // Active player indicator
+          ];
+
+          for (const selector of clockSelectors) {
+            const activeClock = document.querySelector(selector);
+            if (activeClock) {
+              const clockClasses = Array.from(activeClock.classList).join(' ');
+              const clockParentClasses = activeClock.parentElement ? Array.from(activeClock.parentElement.classList).join(' ') : '';
+              const allClasses = clockClasses + ' ' + clockParentClasses;
+
+              console.log('Found active clock with classes:', allClasses);
+
+              // Check if it's black's clock
+              if (allClasses.includes('black') || allClasses.includes('top') || allClasses.includes('opponent')) {
+                turn = 'b';
+                turnDetectionMethod = 'clock-' + selector;
+                break;
+              } else if (allClasses.includes('white') || allClasses.includes('bottom') || allClasses.includes('player')) {
+                turn = 'w';
+                turnDetectionMethod = 'clock-' + selector;
+                break;
+              }
+            }
+          }
+
+          // Method 3: Check board flipped state and active side
+          if (turnDetectionMethod === 'default') {
+            const boardElement = document.querySelector('.board');
+            if (boardElement) {
+              const isFlipped = boardElement.classList.contains('flipped');
+              console.log('Board flipped:', isFlipped);
+
+              // In puzzles, the player to move is usually at the bottom
+              // If board is flipped, black is at bottom
+              // Check for any "to-move" or "turn" indicators
+              const moveIndicators = document.querySelectorAll('[class*="to-move"], [class*="turn"], [class*="active"]');
+              for (const indicator of moveIndicators) {
+                const indicatorClasses = Array.from(indicator.classList).join(' ');
+                console.log('Found move indicator:', indicatorClasses);
+
+                if (indicatorClasses.includes('black')) {
+                  turn = 'b';
+                  turnDetectionMethod = 'move-indicator-black';
+                  break;
+                } else if (indicatorClasses.includes('white')) {
+                  turn = 'w';
+                  turnDetectionMethod = 'move-indicator-white';
+                  break;
+                }
+              }
+            }
+          }
+
+          // Method 4: Check for puzzle-specific indicators
+          if (turnDetectionMethod === 'default') {
+            // Puzzles often have text like "Black to move" or indicators
+            const bodyText = document.body.innerText.toLowerCase();
+            if (bodyText.includes('black to move') || bodyText.includes('black to play')) {
+              turn = 'b';
+              turnDetectionMethod = 'puzzle-text-black';
+            } else if (bodyText.includes('white to move') || bodyText.includes('white to play')) {
+              turn = 'w';
+              turnDetectionMethod = 'puzzle-text-white';
+            }
+          }
+
+          // Method 5: Try to find the last move highlight to determine who moved last
+          if (turnDetectionMethod === 'default') {
+            const highlightedSquares = document.querySelectorAll('[class*="highlight"]');
+            if (highlightedSquares.length >= 2) {
+              // Check what piece color is on the highlighted destination square
+              const destSquare = highlightedSquares[highlightedSquares.length - 1];
+              const pieceOnDest = destSquare.querySelector('.piece');
+              if (pieceOnDest) {
+                const pieceClasses = Array.from(pieceOnDest.classList).join(' ');
+                // If last move was white piece, it's black's turn now
+                if (pieceClasses.includes('wp') || pieceClasses.includes('wn') || pieceClasses.includes('wb') ||
+                    pieceClasses.includes('wr') || pieceClasses.includes('wq') || pieceClasses.includes('wk')) {
+                  turn = 'b';
+                  turnDetectionMethod = 'last-move-white';
+                } else if (pieceClasses.includes('bp') || pieceClasses.includes('bn') || pieceClasses.includes('bb') ||
+                           pieceClasses.includes('br') || pieceClasses.includes('bq') || pieceClasses.includes('bk')) {
+                  turn = 'w';
+                  turnDetectionMethod = 'last-move-black';
+                }
+              }
+            }
+          }
+        }
+
+        // Try to infer castling rights from piece positions
+        // This is an approximation - we can only detect if castling MIGHT be possible
+        let castling = '';
+
+        // Check if white king and rooks are on starting squares
+        const whiteKingOnStart = board[7][4] === 'K'; // e1
+        const whiteKingsideRookOnStart = board[7][7] === 'R'; // h1
+        const whiteQueensideRookOnStart = board[7][0] === 'R'; // a1
+
+        if (whiteKingOnStart && whiteKingsideRookOnStart) castling += 'K';
+        if (whiteKingOnStart && whiteQueensideRookOnStart) castling += 'Q';
+
+        // Check if black king and rooks are on starting squares
+        const blackKingOnStart = board[0][4] === 'k'; // e8
+        const blackKingsideRookOnStart = board[0][7] === 'r'; // h8
+        const blackQueensideRookOnStart = board[0][0] === 'r'; // a8
+
+        if (blackKingOnStart && blackKingsideRookOnStart) castling += 'k';
+        if (blackKingOnStart && blackQueensideRookOnStart) castling += 'q';
+
+        if (castling === '') castling = '-';
+
+        console.log(`Detected turn: ${turn} (method: ${turnDetectionMethod}, moveCount: ${moveCount}, hasCustomStart: ${hasCustomStart})`);
+        console.log(`Inferred castling rights: ${castling}`);
+        return `${fen} ${turn} ${castling} - 0 1`;
       } catch (err) {
         console.error('Error parsing board:', err);
         return null;
       }
-    }, moveHistory.length);
+    }, { moveCount: moveHistory.length, hasCustomStart });
 
     return fen;
   } catch (error) {
@@ -1018,12 +1188,17 @@ app.get('/board', async (req, res) => {
 app.post('/reset', async (req, res) => {
   try {
     const previousMoveCount = moveHistory.length;
+    const hadCustomStart = startingFen !== null;
     moveHistory = [];
+    startingFen = null;
     chess.reset();
 
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     console.log('🔄 Position reset');
     console.log(`   Cleared ${previousMoveCount} moves from history`);
+    if (hadCustomStart) {
+      console.log('   ✓ Custom starting position cleared');
+    }
 
     // Reset time tracking for time control mode
     if (engineConfig.mode === 'time') {
@@ -1058,8 +1233,9 @@ app.post('/reset', async (req, res) => {
 // Set move history manually
 app.post('/position', async (req, res) => {
   try {
-    const { moves } = req.body;
+    const { moves, fen } = req.body;
 
+    // Validate moves array
     if (!Array.isArray(moves)) {
       return res.status(400).json({
         error: 'Moves must be an array of UCI moves (e.g., ["e2e4", "e7e5"])'
@@ -1077,25 +1253,53 @@ app.post('/position', async (req, res) => {
       });
     }
 
-    moveHistory = [...moves];
+    // Set starting FEN if provided
+    if (fen) {
+      try {
+        const testChess = new Chess(fen);
+        startingFen = fen;
+        chess = testChess;
+      } catch (err) {
+        return res.status(400).json({
+          error: 'Invalid FEN string',
+          fen
+        });
+      }
+    } else {
+      startingFen = null;
+      chess.reset();
+    }
 
-    // Update chess.js instance to match
-    chess.reset();
+    // Apply moves
+    moveHistory = [...moves];
     for (const move of moveHistory) {
       const from = move.substring(0, 2);
       const to = move.substring(2, 4);
       const promotion = move.length > 4 ? move[4] : undefined;
-      chess.move({ from, to, promotion });
+      try {
+        chess.move({ from, to, promotion });
+      } catch (err) {
+        return res.status(400).json({
+          error: `Invalid move in sequence: ${move}`,
+          moveHistory: moves
+        });
+      }
     }
 
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     console.log('📍 Position set manually');
-    console.log(`   Moves: ${moveHistory.join(' ')}`);
+    if (startingFen) {
+      console.log(`   Starting FEN: ${startingFen}`);
+    } else {
+      console.log('   Starting from regular starting position');
+    }
+    console.log(`   Moves: ${moveHistory.join(' ') || 'none'}`);
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 
     res.json({
       success: true,
       message: 'Position set',
+      startingFen: startingFen || 'startpos',
       moveHistory,
       moveCount: moveHistory.length,
       timestamp: new Date().toISOString()
@@ -1538,6 +1742,8 @@ app.post('/engine/enable', async (req, res) => {
     engineConfig.selectedEngine = selectedEngineName;
 
     console.log('✓ Engine enabled and ready');
+    console.log(`ℹ Engine debug log: ${engine.debugLogPath}`);
+    console.log('  (Open in a second terminal with: Get-Content engine-debug.log -Wait -Tail 50)');
 
     res.json({
       success: true,
@@ -1651,6 +1857,7 @@ app.post('/engine/switch', async (req, res) => {
     engineConfig.selectedEngine = newEngineName;
 
     console.log('✓ Engine switch completed');
+    console.log(`ℹ Engine debug log: ${engine.debugLogPath}`);
 
     res.json({
       success: true,
@@ -1791,6 +1998,36 @@ app.get('/engine/suggest', async (req, res) => {
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     console.log('🤖 Getting engine suggestion...');
 
+    // Sync position with chess.com board first
+    console.log('   Syncing position with board...');
+    let syncResult = await syncPositionInternal();
+
+    // If sync fails, try resetting and syncing again
+    if (!syncResult.synced) {
+      console.warn('   ⚠ Initial sync failed, attempting reset and retry...');
+
+      // Reset position
+      moveHistory = [];
+      startingFen = null;
+      chess.reset();
+      console.log('   → Position reset');
+
+      // Try syncing again
+      console.log('   → Retrying sync...');
+      syncResult = await syncPositionInternal();
+
+      if (!syncResult.synced) {
+        return res.status(400).json({
+          error: 'Failed to sync position with board after reset',
+          details: syncResult.error || syncResult.message,
+          attempted: 'reset and retry'
+        });
+      }
+      console.log('   ✓ Position synced after reset');
+    } else {
+      console.log('   ✓ Position synced');
+    }
+
     // Get current board state
     const fen = await getBoardState();
     if (!fen) {
@@ -1801,9 +2038,24 @@ app.get('/engine/suggest', async (req, res) => {
 
     console.log(`   Position: ${fen}`);
     console.log(`   Move history (${moveHistory.length} moves):`, moveHistory.join(' '));
+    if (startingFen) {
+      console.log(`   Starting FEN: ${startingFen}`);
+    }
 
     // Set position for engine using move history
-    engine.setPosition('startpos', moveHistory);
+    if (startingFen) {
+      // If we have no moves yet, use the current FEN directly (with correct turn indicator)
+      // Otherwise use the starting FEN + move history
+      if (moveHistory.length === 0) {
+        console.log(`   → Using current FEN (no moves played yet): ${fen}`);
+        engine.setPosition(fen, []);
+      } else {
+        console.log(`   → Using starting FEN + ${moveHistory.length} moves`);
+        engine.setPosition(startingFen, moveHistory);
+      }
+    } else {
+      engine.setPosition('startpos', moveHistory);
+    }
 
     // Get best move based on mode
     let result;
