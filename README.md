@@ -25,8 +25,22 @@ This client uses Microsoft Edge's remote debugging protocol to control your alre
 npm install
 ```
 
-### 2. Start Everything (One Command!)
+### 2. Add Your Chess Engine
 
+Place your UCI chess engine executable(s) in the `engines/` directory:
+- Wilted Engine (recommended)
+- Stockfish
+- Any UCI-compatible engine
+
+The client will automatically discover engines in this directory.
+
+### 3. Start Everything (One Command!)
+
+```powershell
+.\start.ps1
+```
+
+Or equivalently:
 ```powershell
 npm start
 ```

@@ -1,7 +1,7 @@
 {
   "name": "wilted-chesscom-client",
   "version": "2.0.0",
-  "description": "API server to relay moves to chess.com via existing Chrome profile",
+  "description": "API server to relay moves to chess.com via existing Edge profile",
   "main": "src/api-server.js",
   "type": "module",
   "scripts": {

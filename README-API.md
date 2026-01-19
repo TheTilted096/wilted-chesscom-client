@@ -311,13 +311,51 @@ Switch to a different engine at runtime (stops current engine and starts new one
 ```
 
 ### POST /engine/config
-Update engine configuration (nodes, threads). The engine will be restarted with new settings if it's currently running.
+Update engine configuration (mode, nodes, threads, time control, UCI options). The engine will apply settings dynamically if it's currently running.
 
-**Request:**
+**Request Examples:**
+
+Set node limit:
 ```json
 {
-  "nodes": 2000000,
-  "threads": 4
+  "nodes": 2000000
+}
+```
+
+Configure time control:
+```json
+{
+  "timeControl": {
+    "base": 60000,
+    "increment": 1000,
+    "threads": 8
+  }
+}
+```
+
+Set custom UCI option:
+```json
+{
+  "uciOption": {
+    "name": "Hash",
+    "value": "256"
+  }
+}
+```
+
+Multiple settings:
+```json
+{
+  "mode": "time",
+  "timeControl": {
+    "base": 30000,
+    "increment": 500,
+    "threads": 4
+  },
+  "uciOption": {
+    "name": "Minimal",
+    "value": "true"
+  }
 }
 ```
 
@@ -327,9 +365,19 @@ Update engine configuration (nodes, threads). The engine will be restarted with 
   "success": true,
   "message": "Engine configuration updated",
   "config": {
+    "mode": "time",
     "threads": 4,
-    "nodes": 2000000,
-    "selectedEngine": "stockfish"
+    "nodes": 1000000,
+    "timeControl": {
+      "base": 30000,
+      "increment": 500,
+      "threads": 4
+    },
+    "selectedEngine": "wilted",
+    "uciOptions": {
+      "Minimal": "true",
+      "Hash": "256"
+    }
   },
   "engineEnabled": true
 }

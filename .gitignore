@@ -8,3 +8,15 @@ build/
 config.json
 Wilted-Chess-Engine/
 *.bin
+
+# Engine executables - keep local but don't commit
+engines/*.exe
+engines/*.bin
+engines/stockfish*
+engines/lc0*
+engines/komodo*
+engines/Stockfish*
+engines/Wilted*
+engines/wilted*
+# But keep the directory and documentation
+!engines/.gitkeep
