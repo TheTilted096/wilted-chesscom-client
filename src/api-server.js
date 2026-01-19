@@ -54,6 +54,7 @@ let autoplayAutoDetect = false; // Whether to auto-detect color from board orien
 let autoplayInterval = null;
 let autoplayBusy = false; // Prevent concurrent autoplay actions
 let lastQueryFen = null; // Track last position we queried to prevent duplicate queries
+let lastMoveExecutedTime = 0; // Timestamp of last move execution (for debouncing)
 let engineConfig = {
   mode: config.engine?.mode || 'nodes', // 'nodes' or 'time'
   nodes: config.engine?.nodes || 1000000,
@@ -494,6 +495,7 @@ async function syncPositionInternal() {
       startingFen = currentFen;
       moveHistory = [];
       chess.load(currentFen);
+      lastMoveExecutedTime = 0; // Reset debounce timer for new position
 
       return {
         synced: true,
@@ -637,6 +639,17 @@ async function autoplayLoop() {
   try {
     autoplayBusy = true;
 
+    // CRITICAL: Debounce to prevent querying immediately after our move
+    // Give chess.com time to fully process our move and update its internal state
+    const timeSinceLastMove = Date.now() - lastMoveExecutedTime;
+    const DEBOUNCE_MS = 1000; // Wait at least 1000ms after our move before querying again
+
+    if (lastMoveExecutedTime > 0 && timeSinceLastMove < DEBOUNCE_MS) {
+      const waitTime = DEBOUNCE_MS - timeSinceLastMove;
+      console.log(`   ⏱️  Debouncing: ${timeSinceLastMove}ms since last move, waiting ${waitTime}ms more before next query`);
+      return;
+    }
+
     // Check if game is still active
     const isActive = await checkGameStatus();
     if (!isActive) {
@@ -668,6 +681,7 @@ async function autoplayLoop() {
         startingFen = null;
         chess.reset();
         lastQueryFen = null;
+        lastMoveExecutedTime = 0; // Reset debounce timer
 
         console.log(`   ✓ Cleared ${previousMoveCount} moves from old position`);
         console.log(`   ✓ Ready to extract new position for ${currentOrientation}`);
@@ -743,6 +757,13 @@ async function autoplayLoop() {
     console.log(`   📋 Current board FEN: ${currentBoardFen}`);
     console.log(`   📜 Move history (${moveHistory.length} moves): ${moveHistory.join(' ') || 'none'}`);
 
+    // CRITICAL: Must have valid FEN to proceed
+    if (!currentBoardFen) {
+      console.error('❌ FEN VALIDATION FAILED: Could not retrieve valid FEN from board!');
+      console.error('   Board state may be transitioning - will retry next iteration');
+      return;
+    }
+
     // CRITICAL: Prevent querying the same position twice
     // This prevents infinite loops when a move fails
     if (currentBoardFen === lastQueryFen) {
@@ -752,21 +773,79 @@ async function autoplayLoop() {
     }
 
     // CRITICAL: Verify FEN turn indicator matches our expected side
-    if (currentBoardFen) {
-      const fenTurnIndicator = currentBoardFen.split(' ')[1];
-      const fenTurn = fenTurnIndicator === 'w' ? 'white' : 'black';
-      if (fenTurn !== autoplayColor) {
-        console.error('❌ FEN VALIDATION FAILED: Turn indicator mismatch!');
-        console.error(`   FEN says it's ${fenTurn}'s turn (${fenTurnIndicator})`);
-        console.error(`   But we think we're playing as ${autoplayColor}`);
-        console.error(`   FEN: ${currentBoardFen}`);
-        console.error('   Refusing to send incorrect position to engine!');
-        return;
-      }
+    const fenTurnIndicator = currentBoardFen.split(' ')[1];
+    if (!fenTurnIndicator) {
+      console.error('❌ FEN VALIDATION FAILED: FEN is missing turn indicator!');
+      console.error(`   FEN: ${currentBoardFen}`);
+      console.error('   Refusing to send malformed position to engine!');
+      return;
+    }
+
+    const fenTurn = fenTurnIndicator === 'w' ? 'white' : 'black';
+    if (fenTurn !== autoplayColor) {
+      console.error('❌ FEN VALIDATION FAILED: Turn indicator mismatch!');
+      console.error(`   FEN says it's ${fenTurn}'s turn (${fenTurnIndicator})`);
+      console.error(`   But we think we're playing as ${autoplayColor}`);
+      console.error(`   FEN: ${currentBoardFen}`);
+      console.error('   Refusing to send incorrect position to engine!');
+      return;
+    }
+
+    // CRITICAL: Verify consistency between earlier turn detection and current FEN
+    // This catches cases where the board state changed between detectTurn() and now
+    if (fenTurn !== currentTurn) {
+      console.error('❌ CONSISTENCY VALIDATION FAILED: Turn changed between checks!');
+      console.error(`   Earlier detected turn: ${currentTurn}`);
+      console.error(`   Current FEN turn: ${fenTurn}`);
+      console.error(`   This indicates the board state is rapidly changing`);
+      console.error('   Refusing to query engine - will wait for stable state');
+      return;
     }
 
     // Mark this FEN as queried
     lastQueryFen = currentBoardFen;
+
+    // CRITICAL: Final validation - verify that after applying all moves,
+    // it's actually our turn to move using chess.js
+    const verificationChess = startingFen ? new Chess(startingFen) : new Chess();
+    let moveApplicationFailed = false;
+
+    for (const move of moveHistory) {
+      const from = move.substring(0, 2);
+      const to = move.substring(2, 4);
+      const promotion = move.length > 4 ? move[4] : undefined;
+      try {
+        verificationChess.move({ from, to, promotion });
+      } catch (err) {
+        console.error(`❌ MOVE VALIDATION FAILED: Invalid move in history: ${move}`);
+        console.error(`   Position at time of error: ${verificationChess.fen()}`);
+        moveApplicationFailed = true;
+        break;
+      }
+    }
+
+    if (moveApplicationFailed) {
+      console.error('   Move history contains invalid moves - aborting query');
+      console.error('   Suggestion: Use POST /reset to clear invalid move history');
+      return;
+    }
+
+    // Get the turn from the resulting position
+    const finalTurn = verificationChess.turn(); // 'w' or 'b'
+    const finalTurnColor = finalTurn === 'w' ? 'white' : 'black';
+
+    if (finalTurnColor !== autoplayColor) {
+      console.error('❌ FINAL POSITION VALIDATION FAILED: Resulting position has wrong side to move!');
+      console.error(`   After applying ${moveHistory.length} moves, it's ${finalTurnColor}'s turn`);
+      console.error(`   But we're playing as ${autoplayColor}`);
+      console.error(`   FEN after moves: ${verificationChess.fen()}`);
+      console.error(`   Move history: ${moveHistory.join(' ')}`);
+      console.error('   This indicates moveHistory is out of sync with our side');
+      console.error('   Refusing to query engine with wrong position!');
+      return;
+    }
+
+    console.log(`   ✓ Position validation passed: ${moveHistory.length} moves, ${finalTurnColor} to move`);
 
     if (startingFen) {
       // If we have no moves yet, get and use the current FEN (with correct turn indicator)
@@ -783,6 +862,28 @@ async function autoplayLoop() {
       console.log(`   → Position sent to engine: position startpos moves ${moveHistory.join(' ')}`);
       engine.setPosition('startpos', moveHistory);
     }
+
+    // FINAL SAFETY CHECK: Re-verify board state immediately before querying engine
+    // This catches any last-moment changes that might have occurred
+    const finalVerifyFen = await getBoardState();
+    if (!finalVerifyFen) {
+      console.error('❌ FINAL SAFETY CHECK FAILED: Could not get FEN right before engine query');
+      console.error('   Board state may be unstable - aborting query');
+      return;
+    }
+
+    const finalVerifyTurn = finalVerifyFen.split(' ')[1];
+    const finalVerifyTurnColor = finalVerifyTurn === 'w' ? 'white' : 'black';
+
+    if (finalVerifyTurnColor !== autoplayColor) {
+      console.error('❌ FINAL SAFETY CHECK FAILED: Turn changed right before engine query!');
+      console.error(`   FEN now shows ${finalVerifyTurnColor}'s turn, but we're playing ${autoplayColor}`);
+      console.error(`   FEN: ${finalVerifyFen}`);
+      console.error('   This indicates rapid board changes - aborting query');
+      return;
+    }
+
+    console.log(`   ✓ Final safety check passed: ${finalVerifyTurnColor} to move, FEN matches`);
 
     // Get best move based on mode
     let result;
@@ -881,6 +982,10 @@ async function autoplayLoop() {
 
     // Move was successful! Update move history
     moveHistory.push(bestMove);
+
+    // Record timestamp for debouncing (prevent immediate re-query)
+    lastMoveExecutedTime = Date.now();
+
     console.log(`   ✓ Move completed! Total moves: ${moveHistory.length}`);
     console.log(`   📋 FEN after move: ${fenAfterMove}`);
     console.log(`   🔄 Turn indicator after move: ${turnAfterMove} (${turnAfterMoveColor})`);
@@ -915,6 +1020,9 @@ async function startAutoplay() {
   console.log('');
 
   autoplayEnabled = true;
+
+  // Reset debounce timer when starting fresh
+  lastMoveExecutedTime = 0;
 
   // Set up event-driven move detection using MutationObserver
   try {
@@ -1028,6 +1136,9 @@ async function stopAutoplay() {
   }
 
   autoplayEnabled = false;
+
+  // Reset debounce timer when stopping
+  lastMoveExecutedTime = 0;
 
   // Clean up MutationObserver
   try {
@@ -1478,6 +1589,9 @@ app.post('/reset', async (req, res) => {
 
     // Clear lastQueryFen to allow fresh queries after reset
     lastQueryFen = null;
+
+    // Reset debounce timer
+    lastMoveExecutedTime = 0;
 
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     console.log('🔄 Position reset');
@@ -2334,6 +2448,7 @@ app.get('/engine/suggest', async (req, res) => {
       moveHistory = [];
       startingFen = null;
       chess.reset();
+      lastMoveExecutedTime = 0; // Reset debounce timer
       console.log('   → Position reset');
 
       // Try syncing again
