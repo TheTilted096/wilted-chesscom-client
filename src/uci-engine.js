@@ -124,6 +124,14 @@ export class UCIEngine extends EventEmitter {
       console.log(`  Hash: ${this.options.hash} MB`);
     }
 
+    // Set any additional UCI options passed in
+    if (this.options.uciOptions) {
+      for (const [name, value] of Object.entries(this.options.uciOptions)) {
+        this.send(`setoption name ${name} value ${value}`);
+        console.log(`  ${name}: ${value}`);
+      }
+    }
+
     // Wait a bit for options to be set
     await new Promise(resolve => setTimeout(resolve, 100));
   }
@@ -136,6 +144,17 @@ export class UCIEngine extends EventEmitter {
     this.options.threads = threads;
     this.send(`setoption name Threads value ${threads}`);
     console.log(`  Threads updated: ${threads}`);
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+
+  /**
+   * Set a generic UCI option
+   * @param {string} name - Option name (e.g., "Hash", "Ponder", "Minimal")
+   * @param {string|number} value - Option value
+   */
+  async setUCIOption(name, value) {
+    this.send(`setoption name ${name} value ${value}`);
+    console.log(`  UCI Option set: ${name} = ${value}`);
     await new Promise(resolve => setTimeout(resolve, 100));
   }
 

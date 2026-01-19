@@ -130,6 +130,7 @@ async function configEngine(args) {
       console.log('   config mode <nodes|time>');
       console.log('   config nodes <number>');
       console.log('   config time <base> <increment> [threads]');
+      console.log('   config uci <name> value <value>');
       return;
     }
 
@@ -164,8 +165,20 @@ async function configEngine(args) {
       if (threads !== undefined && !isNaN(threads)) {
         body.timeControl.threads = threads;
       }
+    } else if (subcommand === 'uci') {
+      const optionName = args[1];
+      const valueIndex = args.indexOf('value');
+
+      if (!optionName || valueIndex === -1 || !args[valueIndex + 1]) {
+        console.log('❌ Usage: config uci <name> value <value>');
+        return;
+      }
+
+      // Combine all parts after 'value' in case value contains spaces
+      const value = args.slice(valueIndex + 1).join(' ');
+      body = { uciOption: { name: optionName, value } };
     } else {
-      console.log('❌ Unknown subcommand. Use: mode, nodes, or time');
+      console.log('❌ Unknown subcommand. Use: mode, nodes, time, or uci');
       return;
     }
 
@@ -485,6 +498,7 @@ async function main() {
   console.log('    config mode <nodes|time>        - Switch engine mode');
   console.log('    config nodes <number>           - Set node limit');
   console.log('    config time <base> <inc> [thr]  - Set time control');
+  console.log('    config uci <name> value <value> - Set UCI option');
   console.log('    estatus        - Show engine status');
   console.log('    suggest        - Get engine move suggestion');
   console.log('    play           - Get engine move and execute it immediately');

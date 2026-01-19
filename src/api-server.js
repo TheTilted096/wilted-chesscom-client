@@ -54,7 +54,6 @@ let autoplayAutoDetect = false; // Whether to auto-detect color from board orien
 let autoplayInterval = null;
 let autoplayBusy = false; // Prevent concurrent autoplay actions
 let lastQueryFen = null; // Track last position we queried to prevent duplicate queries
-let lastMoveExecutedTime = 0; // Timestamp of last move execution (for debouncing)
 let engineConfig = {
   mode: config.engine?.mode || 'nodes', // 'nodes' or 'time'
   nodes: config.engine?.nodes || 1000000,
@@ -64,7 +63,8 @@ let engineConfig = {
     increment: config.engine?.timeControl?.increment || 1000,
     threads: config.engine?.timeControl?.threads || 8
   },
-  selectedEngine: null // Currently selected engine name
+  selectedEngine: null, // Currently selected engine name
+  uciOptions: {} // Custom UCI options
 };
 
 // Time tracking for time control mode
@@ -495,7 +495,6 @@ async function syncPositionInternal() {
       startingFen = currentFen;
       moveHistory = [];
       chess.load(currentFen);
-      lastMoveExecutedTime = 0; // Reset debounce timer for new position
 
       return {
         synced: true,
@@ -639,17 +638,6 @@ async function autoplayLoop() {
   try {
     autoplayBusy = true;
 
-    // CRITICAL: Debounce to prevent querying immediately after our move
-    // Give chess.com time to fully process our move and update its internal state
-    const timeSinceLastMove = Date.now() - lastMoveExecutedTime;
-    const DEBOUNCE_MS = 1000; // Wait at least 1000ms after our move before querying again
-
-    if (lastMoveExecutedTime > 0 && timeSinceLastMove < DEBOUNCE_MS) {
-      const waitTime = DEBOUNCE_MS - timeSinceLastMove;
-      console.log(`   ⏱️  Debouncing: ${timeSinceLastMove}ms since last move, waiting ${waitTime}ms more before next query`);
-      return;
-    }
-
     // Check if game is still active
     const isActive = await checkGameStatus();
     if (!isActive) {
@@ -681,7 +669,6 @@ async function autoplayLoop() {
         startingFen = null;
         chess.reset();
         lastQueryFen = null;
-        lastMoveExecutedTime = 0; // Reset debounce timer
 
         console.log(`   ✓ Cleared ${previousMoveCount} moves from old position`);
         console.log(`   ✓ Ready to extract new position for ${currentOrientation}`);
@@ -983,9 +970,6 @@ async function autoplayLoop() {
     // Move was successful! Update move history
     moveHistory.push(bestMove);
 
-    // Record timestamp for debouncing (prevent immediate re-query)
-    lastMoveExecutedTime = Date.now();
-
     console.log(`   ✓ Move completed! Total moves: ${moveHistory.length}`);
     console.log(`   📋 FEN after move: ${fenAfterMove}`);
     console.log(`   🔄 Turn indicator after move: ${turnAfterMove} (${turnAfterMoveColor})`);
@@ -1020,9 +1004,6 @@ async function startAutoplay() {
   console.log('');
 
   autoplayEnabled = true;
-
-  // Reset debounce timer when starting fresh
-  lastMoveExecutedTime = 0;
 
   // Set up event-driven move detection using MutationObserver
   try {
@@ -1136,9 +1117,6 @@ async function stopAutoplay() {
   }
 
   autoplayEnabled = false;
-
-  // Reset debounce timer when stopping
-  lastMoveExecutedTime = 0;
 
   // Clean up MutationObserver
   try {
@@ -1589,9 +1567,6 @@ app.post('/reset', async (req, res) => {
 
     // Clear lastQueryFen to allow fresh queries after reset
     lastQueryFen = null;
-
-    // Reset debounce timer
-    lastMoveExecutedTime = 0;
 
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     console.log('🔄 Position reset');
@@ -2173,7 +2148,7 @@ app.post('/engine/enable', async (req, res) => {
 
     // Create and start engine with appropriate thread count
     const threads = engineConfig.mode === 'nodes' ? 1 : engineConfig.timeControl.threads;
-    engine = new UCIEngine(enginePath, { threads });
+    engine = new UCIEngine(enginePath, { threads, uciOptions: engineConfig.uciOptions });
 
     await engine.start();
     engineEnabled = true;
@@ -2288,7 +2263,8 @@ app.post('/engine/switch', async (req, res) => {
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 
     // Start new engine
-    engine = new UCIEngine(newEngine.path);
+    const threads = engineConfig.mode === 'nodes' ? 1 : engineConfig.timeControl.threads;
+    engine = new UCIEngine(newEngine.path, { threads, uciOptions: engineConfig.uciOptions });
 
     await engine.start();
     engineEnabled = true;
@@ -2319,7 +2295,7 @@ app.post('/engine/switch', async (req, res) => {
 // Configure engine
 app.post('/engine/config', async (req, res) => {
   try {
-    const { mode, nodes, threads, timeControl } = req.body;
+    const { mode, nodes, threads, timeControl, uciOption } = req.body;
 
     // Update mode if provided
     if (mode !== undefined) {
@@ -2369,6 +2345,28 @@ app.post('/engine/config', async (req, res) => {
       }
     }
 
+    // Handle UCI option if provided
+    if (uciOption !== undefined) {
+      const { name, value } = uciOption;
+
+      if (!name || value === undefined) {
+        return res.status(400).json({
+          success: false,
+          error: 'UCI option must have name and value'
+        });
+      }
+
+      // Store the UCI option
+      engineConfig.uciOptions[name] = value;
+
+      // If engine is running, apply the option immediately
+      if (engineEnabled && engine) {
+        await engine.setUCIOption(name, value);
+      }
+
+      console.log(`✓ UCI option set: ${name} = ${value}`);
+    }
+
     res.json({
       success: true,
       message: 'Engine configuration updated',
@@ -2377,7 +2375,8 @@ app.post('/engine/config', async (req, res) => {
         nodes: engineConfig.nodes,
         threads: engineConfig.mode === 'nodes' ? 1 : engineConfig.timeControl.threads,
         timeControl: engineConfig.timeControl,
-        selectedEngine: engineConfig.selectedEngine
+        selectedEngine: engineConfig.selectedEngine,
+        uciOptions: engineConfig.uciOptions
       },
       engineEnabled: engineEnabled
     });
@@ -2448,7 +2447,6 @@ app.get('/engine/suggest', async (req, res) => {
       moveHistory = [];
       startingFen = null;
       chess.reset();
-      lastMoveExecutedTime = 0; // Reset debounce timer
       console.log('   → Position reset');
 
       // Try syncing again
