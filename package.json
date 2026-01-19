@@ -7,7 +7,6 @@
   "scripts": {
     "start": "powershell -ExecutionPolicy Bypass -File ./start.ps1",
     "start:api": "node src/api-server.js",
-    "engine": "node src/engine-bridge.js",
     "test": "node src/test-api.js"
   },
   "keywords": ["chess", "uci", "automation", "api"],

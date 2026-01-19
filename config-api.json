@@ -15,13 +15,6 @@
       "base": 60000,
       "increment": 1000,
       "threads": 8
-    },
-    "moveTime": 60000,
-    "increment": 1000
-  },
-  "game": {
-    "autoConnect": true,
-    "waitForGame": true,
-    "pollInterval": 500
+    }
   }
 }

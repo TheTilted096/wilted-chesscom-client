@@ -441,7 +441,7 @@ Create a simple bridge script that:
 4. Gets engine's best move
 5. Sends move to API
 
-Example (see `src/engine-bridge.js` for full implementation):
+Example (see `src/uci-engine.js` for UCI protocol implementation):
 
 ```javascript
 // Get current board
@@ -585,7 +585,8 @@ npm start
 
 ## What's Next?
 
-- See `src/engine-bridge.js` for full UCI engine integration
+- See `src/uci-engine.js` for UCI protocol implementation
+- See `src/api-server.js` for engine integration and autoplay logic
 - Check `config-api.json` for customization options
 
 ## License

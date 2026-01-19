@@ -148,6 +148,58 @@ async function connectToEdge(debuggerUrl = 'http://localhost:9223') {
 }
 
 /**
+ * Combined function to check game status and detect turn in a single DOM query
+ * This reduces page.evaluate() overhead by combining multiple checks
+ */
+async function checkGameStatusAndTurn() {
+  if (!page) return { isActive: false, turn: null };
+
+  try {
+    const result = await page.evaluate(() => {
+      // Check if game is active
+      const board = document.querySelector('.board');
+      const gameOver = document.querySelector('.game-over-modal, .game-over-text');
+      const isActive = board && !gameOver;
+
+      if (!isActive) return { isActive: false, turn: null };
+
+      // Detect turn while we're already in the page context
+      // Method 1: Look for turn indicator text
+      const turnText = document.querySelector('.turn-indicator, .player-turn, [class*="turn"]');
+      if (turnText && turnText.textContent) {
+        const text = turnText.textContent.toLowerCase();
+        if (text.includes('white') || text.includes('you') && !board.classList.contains('flipped')) {
+          return { isActive: true, turn: 'white' };
+        }
+        if (text.includes('black') || text.includes('you') && board.classList.contains('flipped')) {
+          return { isActive: true, turn: 'black' };
+        }
+      }
+
+      // Method 2: Check active clock
+      const whiteClock = document.querySelector('.clock-white, [class*="clock"][class*="white"], .player-component.player-bottom .clock, .clock.player-bottom');
+      const blackClock = document.querySelector('.clock-black, [class*="clock"][class*="black"], .player-component.player-top .clock, .clock.player-top');
+
+      if (whiteClock?.classList.contains('clock-active') || whiteClock?.classList.contains('running')) {
+        return { isActive: true, turn: 'white' };
+      }
+      if (blackClock?.classList.contains('clock-active') || blackClock?.classList.contains('running')) {
+        return { isActive: true, turn: 'black' };
+      }
+
+      // Return board flip status as fallback info
+      return { isActive: true, turn: null, isFlipped: board.classList.contains('flipped') };
+    });
+
+    gameActive = result.isActive;
+    return result;
+  } catch (error) {
+    console.error('Error checking game status and turn:', error.message);
+    return { isActive: false, turn: null };
+  }
+}
+
+/**
  * Check if a game is currently active
  */
 async function checkGameStatus() {
@@ -627,9 +679,10 @@ async function autoplayLoop() {
   try {
     autoplayBusy = true;
 
-    // Check if game is still active
-    const isActive = await checkGameStatus();
-    if (!isActive) {
+    // Combined check: game status and turn detection in a single DOM query
+    const gameState = await checkGameStatusAndTurn();
+
+    if (!gameState.isActive) {
       console.log('⏸️  Game ended - autoplay paused');
       return;
     }
@@ -637,9 +690,9 @@ async function autoplayLoop() {
     // SYNC POSITION FIRST - detect opponent moves
     await syncPositionInternal();
 
-    // Check if it's our turn
-    const ourTurn = await isOurTurn();
-    const currentTurn = await detectTurn();
+    // Determine whose turn it is (use move history as fallback if DOM detection failed)
+    const currentTurn = gameState.turn || (moveHistory.length % 2 === 0 ? 'white' : 'black');
+    const ourTurn = currentTurn === autoplayColor;
 
     if (!ourTurn) {
       // Not our turn, just wait
@@ -728,7 +781,7 @@ async function autoplayLoop() {
 /**
  * Start autoplay monitoring
  */
-function startAutoplay() {
+async function startAutoplay() {
   if (autoplayInterval) {
     clearInterval(autoplayInterval);
   }
@@ -737,14 +790,109 @@ function startAutoplay() {
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
   console.log('🤖 AUTOPLAY ENABLED');
   console.log(`   Playing as: ${autoplayColor}`);
-  console.log(`   Checking every 0.25 seconds...`);
+  console.log('   Using event-driven detection + fallback polling...');
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
   console.log('');
 
   autoplayEnabled = true;
 
-  // Check every 0.25 seconds (250ms)
-  autoplayInterval = setInterval(autoplayLoop, 250);
+  // Set up event-driven move detection using MutationObserver
+  try {
+    // Expose a function that the browser can call when moves are detected
+    await page.exposeFunction('onChessBoardChange', async () => {
+      if (!autoplayEnabled || autoplayBusy) return;
+      console.log('   🔔 Board change detected (event-driven)');
+      await autoplayLoop();
+    });
+
+    // Inject MutationObserver into the page
+    await page.evaluate(() => {
+      // Clean up any existing observer
+      if (window.__chessObserver) {
+        window.__chessObserver.disconnect();
+        delete window.__chessObserver;
+      }
+
+      let debounceTimer = null;
+      const observer = new MutationObserver(() => {
+        // Debounce: wait 20ms for all related mutations to complete
+        // Short delay prevents duplicate triggers while maintaining responsiveness
+        clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(() => {
+          if (window.onChessBoardChange) {
+            window.onChessBoardChange().catch(() => {
+              // Ignore errors - might be called after cleanup
+            });
+          }
+        }, 20);
+      });
+
+      // Watch for changes to the chess board and move list
+      const board = document.querySelector('.board');
+      const moveList = document.querySelector('.move-list, .vertical-move-list');
+
+      // Puzzle-specific elements that might update
+      const puzzleContainer = document.querySelector('.puzzle-layout, [class*="puzzle"]');
+      const movesContainer = document.querySelector('.moves, .move-list, [class*="moves"]');
+
+      let observerActive = false;
+
+      if (board) {
+        observer.observe(board, {
+          childList: true,
+          subtree: true,
+          attributes: true,
+          attributeFilter: ['class', 'style']
+        });
+        observerActive = true;
+        console.log('MutationObserver: watching board element');
+      }
+
+      if (moveList) {
+        observer.observe(moveList, {
+          childList: true,
+          subtree: true
+        });
+        observerActive = true;
+        console.log('MutationObserver: watching move list element');
+      }
+
+      // Watch puzzle-specific containers
+      if (puzzleContainer) {
+        observer.observe(puzzleContainer, {
+          childList: true,
+          subtree: true
+        });
+        observerActive = true;
+        console.log('MutationObserver: watching puzzle container');
+      }
+
+      if (movesContainer && movesContainer !== moveList) {
+        observer.observe(movesContainer, {
+          childList: true,
+          subtree: true
+        });
+        observerActive = true;
+        console.log('MutationObserver: watching moves container');
+      }
+
+      if (observerActive) {
+        console.log('MutationObserver: successfully initialized');
+        window.__chessObserver = observer;
+      } else {
+        console.warn('MutationObserver: no elements found to watch');
+      }
+    });
+
+    console.log('   ✓ Event-driven detection enabled');
+  } catch (error) {
+    console.warn(`   ⚠ Could not set up event-driven detection: ${error.message}`);
+    console.log('   → Falling back to polling-only mode');
+  }
+
+  // Fallback polling at 300ms intervals (in case MutationObserver misses something)
+  // Faster than the old 2s fallback to ensure responsive puzzle opponent moves
+  autoplayInterval = setInterval(autoplayLoop, 300);
 
   // Run immediately
   autoplayLoop();
@@ -753,13 +901,28 @@ function startAutoplay() {
 /**
  * Stop autoplay monitoring
  */
-function stopAutoplay() {
+async function stopAutoplay() {
   if (autoplayInterval) {
     clearInterval(autoplayInterval);
     autoplayInterval = null;
   }
 
   autoplayEnabled = false;
+
+  // Clean up MutationObserver
+  try {
+    if (page) {
+      await page.evaluate(() => {
+        if (window.__chessObserver) {
+          window.__chessObserver.disconnect();
+          delete window.__chessObserver;
+          console.log('MutationObserver: disconnected and cleaned up');
+        }
+      });
+    }
+  } catch (error) {
+    // Ignore errors during cleanup
+  }
 
   console.log('');
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
@@ -1327,15 +1490,80 @@ app.post('/autoplay/enable', async (req, res) => {
       return res.status(400).json({ error: 'Color must be "white" or "black"' });
     }
 
-    // Set color (default to white)
-    if (color) {
-      autoplayColor = color;
-    }
+    // Check if we're in a puzzle
+    const puzzleInfo = await page.evaluate(() => {
+      const isPuzzle = window.location.href.includes('/puzzles') ||
+                       window.location.href.includes('/puzzle/') ||
+                       document.querySelector('.puzzle-layout, [class*="puzzle"]') !== null;
+
+      if (!isPuzzle) return { isPuzzle: false };
+
+      // In puzzles, detect which side is to move (the side the user plays)
+      // Check the board state to determine whose turn it is
+      const board = document.querySelector('.board');
+      if (!board) return { isPuzzle, sideToMove: null };
+
+      // Look for puzzle indicators - try multiple selectors
+      const puzzleSelectors = [
+        '.puzzle-header',
+        '[class*="puzzle"][class*="header"]',
+        '.puzzle-title',
+        '[class*="puzzle"][class*="title"]',
+        '[class*="puzzle"] h1',
+        '[class*="puzzle"] h2',
+        '[class*="puzzle-info"]',
+        '.daily-puzzle-header'
+      ];
+
+      let headerText = '';
+      for (const selector of puzzleSelectors) {
+        const element = document.querySelector(selector);
+        if (element?.textContent) {
+          headerText = element.textContent.toLowerCase();
+          if (headerText.includes('to play') || headerText.includes('to move')) {
+            break; // Found relevant text
+          }
+        }
+      }
+
+      // Also check meta description or puzzle data
+      if (!headerText) {
+        const metaDescription = document.querySelector('meta[name="description"]');
+        if (metaDescription?.content) {
+          headerText = metaDescription.content.toLowerCase();
+        }
+      }
+
+      // Detect color from header text - multiple patterns
+      const blackPatterns = ['black to', 'black to play', 'black to move', 'black plays', 'black wins'];
+      const whitePatterns = ['white to', 'white to play', 'white to move', 'white plays', 'white wins'];
+
+      for (const pattern of blackPatterns) {
+        if (headerText.includes(pattern)) {
+          return { isPuzzle: true, sideToMove: 'black' };
+        }
+      }
+
+      for (const pattern of whitePatterns) {
+        if (headerText.includes(pattern)) {
+          return { isPuzzle: true, sideToMove: 'white' };
+        }
+      }
+
+      // Fallback: use DOM indicators or assume it's the side to move
+      return { isPuzzle: true, sideToMove: null };
+    });
 
     // Auto-sync position before starting
     console.log('');
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     console.log('🔄 Auto-syncing position before enabling autoplay...');
+
+    // In puzzles, wait briefly for any automated setup moves to complete
+    if (puzzleInfo.isPuzzle) {
+      console.log('   🧩 Puzzle detected - waiting for position to stabilize...');
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
 
     const syncResult = await syncPositionInternal();
 
@@ -1362,13 +1590,43 @@ app.post('/autoplay/enable', async (req, res) => {
       });
     }
 
+    // Set color based on puzzle or user input
+    if (puzzleInfo.isPuzzle) {
+      // In puzzles, auto-detect the playing color (side to move)
+      let sideToMove = puzzleInfo.sideToMove;
+
+      // If header detection failed, use FEN's turn indicator as fallback
+      if (!sideToMove && syncResult.currentFen) {
+        // FEN format: "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+        //                                                          ^
+        //                                                      turn indicator
+        const fenParts = syncResult.currentFen.split(' ');
+        const turnIndicator = fenParts[1]; // 'w' or 'b'
+        sideToMove = turnIndicator === 'w' ? 'white' : 'black';
+        console.log(`   → FEN turn indicator: ${turnIndicator} (${sideToMove})`);
+      }
+
+      // Final fallback (should rarely be needed)
+      if (!sideToMove) {
+        sideToMove = moveHistory.length % 2 === 0 ? 'white' : 'black';
+        console.log(`   → Using move count fallback: ${sideToMove}`);
+      }
+
+      autoplayColor = sideToMove;
+      console.log(`   🧩 Puzzle detected! Auto-detected playing as: ${autoplayColor}`);
+    } else {
+      // In regular games, use specified color (default to white)
+      autoplayColor = color || 'white';
+    }
+
     // Start autoplay
-    startAutoplay();
+    await startAutoplay();
 
     res.json({
       success: true,
       message: 'Autoplay enabled',
       color: autoplayColor,
+      isPuzzle: puzzleInfo.isPuzzle,
       moveCount: moveHistory.length,
       moveHistory: moveHistory.length > 0 ? moveHistory : undefined,
       synced: syncResult.synced,
@@ -1382,7 +1640,7 @@ app.post('/autoplay/enable', async (req, res) => {
 // Disable autoplay
 app.post('/autoplay/disable', async (req, res) => {
   try {
-    stopAutoplay();
+    await stopAutoplay();
 
     res.json({
       success: true,
@@ -2193,7 +2451,7 @@ async function start() {
     // Stop autoplay if running
     if (autoplayEnabled) {
       console.log('Stopping autoplay...');
-      stopAutoplay();
+      await stopAutoplay();
     }
 
     // Stop engine if running
