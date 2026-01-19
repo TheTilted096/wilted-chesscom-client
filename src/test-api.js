@@ -304,12 +304,24 @@ async function makeMove(move) {
 
 async function enableAutoplay(color) {
   try {
-    console.log(`\n🤖 Enabling autoplay as ${color}...`);
-    const result = await apiRequest('POST', '/autoplay/enable', { color });
+    if (color) {
+      console.log(`\n🤖 Enabling autoplay as ${color}...`);
+    } else {
+      console.log(`\n🤖 Enabling autoplay with auto-detection...`);
+    }
+
+    const requestBody = color ? { color } : {};
+    const result = await apiRequest('POST', '/autoplay/enable', requestBody);
 
     if (result.success) {
       console.log(`✓ Autoplay enabled!`);
       console.log(`  Playing as: ${result.color}`);
+      if (result.isPuzzle) {
+        console.log(`  🧩 Puzzle mode detected`);
+      }
+      if (!color) {
+        console.log(`  🔍 Auto-detected color from position`);
+      }
       console.log(`  The engine will automatically play when it's your turn`);
     } else {
       console.log('❌ Failed:', result.error);
@@ -529,8 +541,9 @@ async function main() {
         console.log('    play           - Get engine move and execute it immediately');
         console.log('');
         console.log('  AUTOPLAY:');
-        console.log('    auto white     - Enable autoplay as white');
-        console.log('    auto black     - Enable autoplay as black');
+        console.log('    auto           - Enable autoplay with auto-detection (recommended)');
+        console.log('    auto white     - Force play as white');
+        console.log('    auto black     - Force play as black');
         console.log('    auto off       - Disable autoplay');
         console.log('    auto status    - Show autoplay status');
         console.log('');
@@ -590,10 +603,16 @@ async function main() {
           await enableAutoplay('black');
         } else if (subcommand === 'off' || subcommand === 'stop' || subcommand === 'disable') {
           await disableAutoplay();
-        } else if (subcommand === 'status' || !subcommand) {
+        } else if (subcommand === 'status') {
           await getAutoplayStatus();
+        } else if (!subcommand) {
+          // No color specified - auto-detect mode
+          await enableAutoplay(null);
         } else {
           console.log('❌ Usage: auto [white|black|off|status]');
+          console.log('   auto        - Auto-detect which side to play (recommended for puzzles)');
+          console.log('   auto white  - Force play as white');
+          console.log('   auto black  - Force play as black');
         }
       } else if (command === '') {
         // Skip empty input

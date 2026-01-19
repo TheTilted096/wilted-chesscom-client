@@ -50,8 +50,10 @@ let engineEnabled = false;
 // Autoplay state
 let autoplayEnabled = false;
 let autoplayColor = 'white'; // 'white' or 'black'
+let autoplayAutoDetect = false; // Whether to auto-detect color from board orientation
 let autoplayInterval = null;
 let autoplayBusy = false; // Prevent concurrent autoplay actions
+let lastQueryFen = null; // Track last position we queried to prevent duplicate queries
 let engineConfig = {
   mode: config.engine?.mode || 'nodes', // 'nodes' or 'time'
   nodes: config.engine?.nodes || 1000000,
@@ -148,54 +150,42 @@ async function connectToEdge(debuggerUrl = 'http://localhost:9223') {
 }
 
 /**
- * Combined function to check game status and detect turn in a single DOM query
- * This reduces page.evaluate() overhead by combining multiple checks
+ * Check if we're currently in a puzzle (not a real game)
+ * Puzzles don't need time tracking accumulation
  */
-async function checkGameStatusAndTurn() {
-  if (!page) return { isActive: false, turn: null };
+async function isInPuzzle() {
+  if (!page) return false;
 
   try {
-    const result = await page.evaluate(() => {
-      // Check if game is active
-      const board = document.querySelector('.board');
-      const gameOver = document.querySelector('.game-over-modal, .game-over-text');
-      const isActive = board && !gameOver;
-
-      if (!isActive) return { isActive: false, turn: null };
-
-      // Detect turn while we're already in the page context
-      // Method 1: Look for turn indicator text
-      const turnText = document.querySelector('.turn-indicator, .player-turn, [class*="turn"]');
-      if (turnText && turnText.textContent) {
-        const text = turnText.textContent.toLowerCase();
-        if (text.includes('white') || text.includes('you') && !board.classList.contains('flipped')) {
-          return { isActive: true, turn: 'white' };
-        }
-        if (text.includes('black') || text.includes('you') && board.classList.contains('flipped')) {
-          return { isActive: true, turn: 'black' };
-        }
-      }
-
-      // Method 2: Check active clock
-      const whiteClock = document.querySelector('.clock-white, [class*="clock"][class*="white"], .player-component.player-bottom .clock, .clock.player-bottom');
-      const blackClock = document.querySelector('.clock-black, [class*="clock"][class*="black"], .player-component.player-top .clock, .clock.player-top');
-
-      if (whiteClock?.classList.contains('clock-active') || whiteClock?.classList.contains('running')) {
-        return { isActive: true, turn: 'white' };
-      }
-      if (blackClock?.classList.contains('clock-active') || blackClock?.classList.contains('running')) {
-        return { isActive: true, turn: 'black' };
-      }
-
-      // Return board flip status as fallback info
-      return { isActive: true, turn: null, isFlipped: board.classList.contains('flipped') };
+    return await page.evaluate(() => {
+      const url = window.location.href;
+      return url.includes('/puzzles') ||
+             url.includes('/puzzle/') ||
+             url.includes('/daily-chess-puzzle');
     });
-
-    gameActive = result.isActive;
-    return result;
   } catch (error) {
-    console.error('Error checking game status and turn:', error.message);
-    return { isActive: false, turn: null };
+    return false;
+  }
+}
+
+/**
+ * Get which side is at the bottom of the board (the side we're playing)
+ * Returns 'white', 'black', or null
+ */
+async function getBoardOrientation() {
+  if (!page) return null;
+
+  try {
+    return await page.evaluate(() => {
+      const board = document.querySelector('.board');
+      if (!board) return null;
+
+      // If board has 'flipped' class, black is on bottom; otherwise white is on bottom
+      return board.classList.contains('flipped') ? 'black' : 'white';
+    });
+  } catch (error) {
+    console.error('Error getting board orientation:', error.message);
+    return null;
   }
 }
 
@@ -220,61 +210,23 @@ async function checkGameStatus() {
 }
 
 /**
- * Detect whose turn it is
+ * Detect whose turn it is using FEN turn indicator
  * Returns 'white', 'black', or null if unable to determine
  */
 async function detectTurn() {
   if (!page) return null;
 
   try {
-    const turnInfo = await page.evaluate(() => {
-      // Method 1: Check for highlighted squares or move indicators
-      const board = document.querySelector('.board');
-      if (!board) return { method: 'none', turn: null };
+    // Get current FEN and extract turn indicator
+    const currentFen = await getBoardState();
+    if (!currentFen) return null;
 
-      // Method 2: Look for turn indicator text
-      const turnText = document.querySelector('.turn-indicator, .player-turn, [class*="turn"]');
-      if (turnText && turnText.textContent) {
-        const text = turnText.textContent.toLowerCase();
-        if (text.includes('white') || text.includes('you') && !board.classList.contains('flipped')) {
-          return { method: 'text', turn: 'white' };
-        }
-        if (text.includes('black') || text.includes('you') && board.classList.contains('flipped')) {
-          return { method: 'text', turn: 'black' };
-        }
-      }
-
-      // Method 3: Check if board is flipped and look for active player
-      const isFlipped = board.classList.contains('flipped');
-
-      // Method 4: Look for clock that's ticking or highlighted player
-      const whiteClock = document.querySelector('.clock-white, [class*="clock"][class*="white"], .player-component.player-bottom .clock, .clock.player-bottom');
-      const blackClock = document.querySelector('.clock-black, [class*="clock"][class*="black"], .player-component.player-top .clock, .clock.player-top');
-
-      // Active clock might have a specific class
-      if (whiteClock?.classList.contains('clock-active') || whiteClock?.classList.contains('running')) {
-        return { method: 'clock', turn: 'white' };
-      }
-      if (blackClock?.classList.contains('clock-active') || blackClock?.classList.contains('running')) {
-        return { method: 'clock', turn: 'black' };
-      }
-
-      // Return board flip status as fallback info
-      return { method: 'flip', turn: null, isFlipped };
-    });
-
-    // If we couldn't detect from DOM, use move history
-    if (!turnInfo.turn) {
-      // Even number of moves = white's turn, odd = black's turn
-      const turn = moveHistory.length % 2 === 0 ? 'white' : 'black';
-      return turn;
-    }
-
-    return turnInfo.turn;
+    const fenParts = currentFen.split(' ');
+    const turnIndicator = fenParts[1]; // 'w' or 'b'
+    return turnIndicator === 'w' ? 'white' : 'black';
   } catch (error) {
     console.error('Error detecting turn:', error.message);
-    // Fallback to move history
-    return moveHistory.length % 2 === 0 ? 'white' : 'black';
+    return null;
   }
 }
 
@@ -504,6 +456,9 @@ async function syncPositionInternal() {
           console.log(`   ✓ Synced position with ${validMoves.length} extracted moves`);
           console.log(`   → Move history: ${moveHistory.join(' ')}`);
 
+          // Clear lastQueryFen since we have a fresh position
+          lastQueryFen = null;
+
           return {
             synced: true,
             positionsMatch: true,
@@ -602,6 +557,9 @@ async function syncPositionInternal() {
       // Update chess instance
       chess.load(currentFen);
 
+      // Clear lastQueryFen since position changed (opponent moved)
+      lastQueryFen = null;
+
       return {
         synced: true,
         positionsMatch: false,
@@ -679,10 +637,9 @@ async function autoplayLoop() {
   try {
     autoplayBusy = true;
 
-    // Combined check: game status and turn detection in a single DOM query
-    const gameState = await checkGameStatusAndTurn();
-
-    if (!gameState.isActive) {
+    // Check if game is still active
+    const isActive = await checkGameStatus();
+    if (!isActive) {
       console.log('⏸️  Game ended - autoplay paused');
       return;
     }
@@ -690,12 +647,79 @@ async function autoplayLoop() {
     // SYNC POSITION FIRST - detect opponent moves
     await syncPositionInternal();
 
-    // Determine whose turn it is (use move history as fallback if DOM detection failed)
-    const currentTurn = gameState.turn || (moveHistory.length % 2 === 0 ? 'white' : 'black');
+    // In auto-detect mode, re-detect board orientation before each move
+    // This handles cases where the board flips (e.g., between puzzles)
+    if (autoplayAutoDetect) {
+      const currentOrientation = await getBoardOrientation();
+      if (!currentOrientation) {
+        console.log('⚠️  Could not detect board orientation - skipping this iteration');
+        return;
+      }
+
+      if (currentOrientation !== autoplayColor) {
+        console.log('');
+        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+        console.log(`🔄 BOARD ORIENTATION CHANGED: ${autoplayColor} → ${currentOrientation}`);
+        console.log('   New puzzle/position detected - auto-resetting...');
+
+        // Clear old position state to pick up new puzzle fresh
+        const previousMoveCount = moveHistory.length;
+        moveHistory = [];
+        startingFen = null;
+        chess.reset();
+        lastQueryFen = null;
+
+        console.log(`   ✓ Cleared ${previousMoveCount} moves from old position`);
+        console.log(`   ✓ Ready to extract new position for ${currentOrientation}`);
+
+        // Update to new orientation
+        autoplayColor = currentOrientation;
+
+        // Re-sync to extract the new position
+        console.log('   🔄 Extracting new puzzle position...');
+        const syncResult = await syncPositionInternal();
+
+        if (syncResult.synced) {
+          console.log(`   ✓ Position extracted: ${syncResult.moveCount || 0} moves`);
+          console.log(`   → FEN: ${syncResult.currentFen}`);
+        } else {
+          console.log('   ⚠️  Could not sync new position');
+        }
+
+        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+        console.log('');
+
+        // Wait for next iteration to ensure position is fully synced before playing
+        return;
+      }
+    }
+
+    // Determine whose turn it is from FEN
+    const currentTurn = await detectTurn();
+
+    if (!currentTurn) {
+      console.log('⚠️  Could not detect current turn - skipping this iteration');
+      return;
+    }
+
     const ourTurn = currentTurn === autoplayColor;
+
+    // Diagnostic logging
+    console.log(`🔍 Turn check: currentTurn=${currentTurn}, autoplayColor=${autoplayColor}, ourTurn=${ourTurn}`);
 
     if (!ourTurn) {
       // Not our turn, just wait
+      console.log(`⏳ Waiting... (it's ${currentTurn}'s turn, we're ${autoplayColor})`);
+      return;
+    }
+
+    // CRITICAL ASSERTION: Double-check that we're about to play the correct side
+    // This prevents the engine from being queried with the wrong position
+    if (currentTurn !== autoplayColor) {
+      console.error('❌ ASSERTION FAILED: currentTurn !== autoplayColor');
+      console.error(`   currentTurn: ${currentTurn}`);
+      console.error(`   autoplayColor: ${autoplayColor}`);
+      console.error('   Refusing to query engine with mismatched sides!');
       return;
     }
 
@@ -715,17 +739,48 @@ async function autoplayLoop() {
 
     // Set position for engine
     console.log('   Setting position...');
+    const currentBoardFen = await getBoardState();
+    console.log(`   📋 Current board FEN: ${currentBoardFen}`);
+    console.log(`   📜 Move history (${moveHistory.length} moves): ${moveHistory.join(' ') || 'none'}`);
+
+    // CRITICAL: Prevent querying the same position twice
+    // This prevents infinite loops when a move fails
+    if (currentBoardFen === lastQueryFen) {
+      console.log('   ⏭️  Skipping: Already queried engine for this exact position');
+      console.log('   Waiting for position to change before querying again');
+      return;
+    }
+
+    // CRITICAL: Verify FEN turn indicator matches our expected side
+    if (currentBoardFen) {
+      const fenTurnIndicator = currentBoardFen.split(' ')[1];
+      const fenTurn = fenTurnIndicator === 'w' ? 'white' : 'black';
+      if (fenTurn !== autoplayColor) {
+        console.error('❌ FEN VALIDATION FAILED: Turn indicator mismatch!');
+        console.error(`   FEN says it's ${fenTurn}'s turn (${fenTurnIndicator})`);
+        console.error(`   But we think we're playing as ${autoplayColor}`);
+        console.error(`   FEN: ${currentBoardFen}`);
+        console.error('   Refusing to send incorrect position to engine!');
+        return;
+      }
+    }
+
+    // Mark this FEN as queried
+    lastQueryFen = currentBoardFen;
+
     if (startingFen) {
       // If we have no moves yet, get and use the current FEN (with correct turn indicator)
       if (moveHistory.length === 0) {
-        const currentFen = await getBoardState();
-        console.log(`   → Using current FEN (no moves played yet): ${currentFen}`);
-        engine.setPosition(currentFen, []);
+        console.log(`   → Using current FEN (no moves played yet): ${currentBoardFen}`);
+        engine.setPosition(currentBoardFen, []);
       } else {
         console.log(`   → Using custom starting FEN + ${moveHistory.length} moves: ${startingFen}`);
+        console.log(`   → Position sent to engine: fen ${startingFen} moves ${moveHistory.join(' ')}`);
         engine.setPosition(startingFen, moveHistory);
       }
     } else {
+      console.log(`   → Using standard start + ${moveHistory.length} moves`);
+      console.log(`   → Position sent to engine: position startpos moves ${moveHistory.join(' ')}`);
       engine.setPosition('startpos', moveHistory);
     }
 
@@ -739,35 +794,100 @@ async function autoplayLoop() {
       bestMove = result.move;
     } else {
       // Time control mode
-      console.log(`   Calculating (time control: ${timeTracking.whiteTime}ms + ${timeTracking.increment}ms, ${engineConfig.timeControl.threads} threads)...`);
-      result = await engine.go(
-        timeTracking.whiteTime,
-        timeTracking.blackTime,
-        timeTracking.increment,
-        timeTracking.increment
-      );
-      bestMove = result.move;
-      const timeUsed = result.timeUsed;
+      const inPuzzle = await isInPuzzle();
 
-      // Update time tracking
-      if (autoplayColor === 'white') {
-        timeTracking.whiteTime = timeTracking.whiteTime - timeUsed + timeTracking.increment;
-        console.log(`   ⏱️  White time used: ${timeUsed}ms, remaining: ${timeTracking.whiteTime}ms`);
+      if (inPuzzle) {
+        // In puzzles, always use fresh time control (don't track accumulation)
+        console.log(`   Calculating (time control: ${engineConfig.timeControl.base}ms + ${engineConfig.timeControl.increment}ms, ${engineConfig.timeControl.threads} threads) [PUZZLE MODE]...`);
+        result = await engine.go(
+          engineConfig.timeControl.base,
+          engineConfig.timeControl.base,
+          engineConfig.timeControl.increment,
+          engineConfig.timeControl.increment
+        );
+        bestMove = result.move;
+        // Don't update time tracking in puzzles
       } else {
-        timeTracking.blackTime = timeTracking.blackTime - timeUsed + timeTracking.increment;
-        console.log(`   ⏱️  Black time used: ${timeUsed}ms, remaining: ${timeTracking.blackTime}ms`);
+        // In real games, track time accumulation
+        console.log(`   Calculating (time control: ${timeTracking.whiteTime}ms + ${timeTracking.increment}ms, ${engineConfig.timeControl.threads} threads)...`);
+        result = await engine.go(
+          timeTracking.whiteTime,
+          timeTracking.blackTime,
+          timeTracking.increment,
+          timeTracking.increment
+        );
+        bestMove = result.move;
+        const timeUsed = result.timeUsed;
+
+        // Update time tracking for real games
+        if (autoplayColor === 'white') {
+          timeTracking.whiteTime = timeTracking.whiteTime - timeUsed + timeTracking.increment;
+          console.log(`   ⏱️  White time used: ${timeUsed}ms, remaining: ${timeTracking.whiteTime}ms`);
+        } else {
+          timeTracking.blackTime = timeTracking.blackTime - timeUsed + timeTracking.increment;
+          console.log(`   ⏱️  Black time used: ${timeUsed}ms, remaining: ${timeTracking.blackTime}ms`);
+        }
       }
     }
 
     console.log(`   ✓ Engine suggests: ${bestMove}`);
 
+    // Get the board state BEFORE executing the move (for verification)
+    const fenBeforeMove = await getBoardState();
+    const moveCountBefore = moveHistory.length;
+
     // Execute the move
     console.log('   Executing move on board...');
-    await executeMove(bestMove);
+    try {
+      await executeMove(bestMove);
+    } catch (error) {
+      console.error('   ❌ Failed to execute move:', error.message);
+      console.error('   Move history NOT updated (move rejected)');
+      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      console.log('');
+      return;
+    }
 
-    // Track the move
+    // Wait for chess.com to process the move
+    await page.waitForTimeout(150);
+
+    // Check the board state after our move to verify it went through
+    const fenAfterMove = await getBoardState();
+
+    // Verify the move was accepted by checking if the FEN changed
+    if (fenAfterMove === fenBeforeMove) {
+      console.error('   ❌ Move was REJECTED! Board state did not change.');
+      console.error(`   FEN before: ${fenBeforeMove}`);
+      console.error(`   FEN after:  ${fenAfterMove}`);
+      console.error('   Move history NOT updated (illegal move)');
+      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      console.log('');
+      return;
+    }
+
+    // Verify the turn changed (our move went through)
+    const turnAfterMove = fenAfterMove.split(' ')[1];
+    const turnAfterMoveColor = turnAfterMove === 'w' ? 'white' : 'black';
+
+    if (turnAfterMoveColor === autoplayColor) {
+      console.error('   ❌ Turn did NOT change! Move may have been rejected.');
+      console.error(`   Turn before move: ${autoplayColor}`);
+      console.error(`   Turn after move:  ${turnAfterMoveColor}`);
+      console.error('   Move history NOT updated');
+      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      console.log('');
+      return;
+    }
+
+    // Move was successful! Update move history
     moveHistory.push(bestMove);
     console.log(`   ✓ Move completed! Total moves: ${moveHistory.length}`);
+    console.log(`   📋 FEN after move: ${fenAfterMove}`);
+    console.log(`   🔄 Turn indicator after move: ${turnAfterMove} (${turnAfterMoveColor})`);
+
+    // Clear lastQueryFen so we can query the new position when it's our turn again
+    lastQueryFen = null;
+
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     console.log('');
 
@@ -1267,28 +1387,28 @@ async function executeMove(uciMove) {
     await page.mouse.move(coords.fromX, coords.fromY);
     console.log('  → Mouse down');
     await page.mouse.down();
-    await page.waitForTimeout(50); // Reduced from 100ms
+    await page.waitForTimeout(30);
     console.log(`  → Dragging to (${coords.toX}, ${coords.toY})`);
-    await page.mouse.move(coords.toX, coords.toY, { steps: 5 }); // Reduced from 10 steps
-    await page.waitForTimeout(50); // Reduced from 100ms
+    await page.mouse.move(coords.toX, coords.toY, { steps: 3 });
+    await page.waitForTimeout(30);
     console.log('  → Mouse up');
     await page.mouse.up();
 
     // Handle promotion if needed (click destination square again)
     if (promotion) {
       console.log(`  → Handling promotion to ${promotion}...`);
-      await page.waitForTimeout(100); // Wait for promotion dialog to appear
+      await page.waitForTimeout(80); // Wait for promotion dialog to appear
 
       // Simply click the destination square again (promotes to queen by default)
       console.log(`  → Clicking destination square again at (${coords.toX}, ${coords.toY})`);
       await page.mouse.click(coords.toX, coords.toY);
       console.log('  ✓ Promotion piece selected');
 
-      await page.waitForTimeout(150);
+      await page.waitForTimeout(100);
     }
 
     // Wait for move to be processed
-    await page.waitForTimeout(200); // Reduced from 300ms
+    await page.waitForTimeout(100);
 
     console.log('✓ Move executed successfully');
     return { success: true, move: uciMove };
@@ -1356,6 +1476,9 @@ app.post('/reset', async (req, res) => {
     startingFen = null;
     chess.reset();
 
+    // Clear lastQueryFen to allow fresh queries after reset
+    lastQueryFen = null;
+
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     console.log('🔄 Position reset');
     console.log(`   Cleared ${previousMoveCount} moves from history`);
@@ -1378,6 +1501,20 @@ app.post('/reset', async (req, res) => {
       console.log('   ✓ Engine reset for new game');
     }
 
+    // If autoplay is enabled in auto-detect mode, re-detect board orientation
+    let colorRedetected = false;
+    if (autoplayEnabled && autoplayAutoDetect) {
+      const boardOrientation = await getBoardOrientation();
+      if (boardOrientation && boardOrientation !== autoplayColor) {
+        const oldColor = autoplayColor;
+        autoplayColor = boardOrientation;
+        console.log(`   🔍 Re-detected board orientation: ${oldColor} → ${autoplayColor}`);
+        colorRedetected = true;
+      } else if (boardOrientation) {
+        console.log(`   ✓ Board orientation confirmed: ${autoplayColor}`);
+      }
+    }
+
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 
     res.json({
@@ -1386,6 +1523,8 @@ app.post('/reset', async (req, res) => {
       previousMoveCount,
       engineReset: engineEnabled && engine && engine.isReady(),
       timeTrackingReset: engineConfig.mode === 'time',
+      colorRedetected,
+      newColor: colorRedetected ? autoplayColor : undefined,
       timestamp: new Date().toISOString()
     });
   } catch (error) {
@@ -1485,85 +1624,15 @@ app.post('/autoplay/enable', async (req, res) => {
       return res.status(400).json({ error: 'Engine not enabled. Use /engine/enable first' });
     }
 
-    // Validate color
+    // Validate color (optional - if not provided, will auto-detect)
     if (color && color !== 'white' && color !== 'black') {
-      return res.status(400).json({ error: 'Color must be "white" or "black"' });
+      return res.status(400).json({ error: 'Color must be "white", "black", or omitted for auto-detection' });
     }
-
-    // Check if we're in a puzzle
-    const puzzleInfo = await page.evaluate(() => {
-      const isPuzzle = window.location.href.includes('/puzzles') ||
-                       window.location.href.includes('/puzzle/') ||
-                       document.querySelector('.puzzle-layout, [class*="puzzle"]') !== null;
-
-      if (!isPuzzle) return { isPuzzle: false };
-
-      // In puzzles, detect which side is to move (the side the user plays)
-      // Check the board state to determine whose turn it is
-      const board = document.querySelector('.board');
-      if (!board) return { isPuzzle, sideToMove: null };
-
-      // Look for puzzle indicators - try multiple selectors
-      const puzzleSelectors = [
-        '.puzzle-header',
-        '[class*="puzzle"][class*="header"]',
-        '.puzzle-title',
-        '[class*="puzzle"][class*="title"]',
-        '[class*="puzzle"] h1',
-        '[class*="puzzle"] h2',
-        '[class*="puzzle-info"]',
-        '.daily-puzzle-header'
-      ];
-
-      let headerText = '';
-      for (const selector of puzzleSelectors) {
-        const element = document.querySelector(selector);
-        if (element?.textContent) {
-          headerText = element.textContent.toLowerCase();
-          if (headerText.includes('to play') || headerText.includes('to move')) {
-            break; // Found relevant text
-          }
-        }
-      }
-
-      // Also check meta description or puzzle data
-      if (!headerText) {
-        const metaDescription = document.querySelector('meta[name="description"]');
-        if (metaDescription?.content) {
-          headerText = metaDescription.content.toLowerCase();
-        }
-      }
-
-      // Detect color from header text - multiple patterns
-      const blackPatterns = ['black to', 'black to play', 'black to move', 'black plays', 'black wins'];
-      const whitePatterns = ['white to', 'white to play', 'white to move', 'white plays', 'white wins'];
-
-      for (const pattern of blackPatterns) {
-        if (headerText.includes(pattern)) {
-          return { isPuzzle: true, sideToMove: 'black' };
-        }
-      }
-
-      for (const pattern of whitePatterns) {
-        if (headerText.includes(pattern)) {
-          return { isPuzzle: true, sideToMove: 'white' };
-        }
-      }
-
-      // Fallback: use DOM indicators or assume it's the side to move
-      return { isPuzzle: true, sideToMove: null };
-    });
 
     // Auto-sync position before starting
     console.log('');
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     console.log('🔄 Auto-syncing position before enabling autoplay...');
-
-    // In puzzles, wait briefly for any automated setup moves to complete
-    if (puzzleInfo.isPuzzle) {
-      console.log('   🧩 Puzzle detected - waiting for position to stabilize...');
-      await new Promise(resolve => setTimeout(resolve, 500));
-    }
 
     const syncResult = await syncPositionInternal();
 
@@ -1590,33 +1659,30 @@ app.post('/autoplay/enable', async (req, res) => {
       });
     }
 
-    // Set color based on puzzle or user input
-    if (puzzleInfo.isPuzzle) {
-      // In puzzles, auto-detect the playing color (side to move)
-      let sideToMove = puzzleInfo.sideToMove;
-
-      // If header detection failed, use FEN's turn indicator as fallback
-      if (!sideToMove && syncResult.currentFen) {
-        // FEN format: "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
-        //                                                          ^
-        //                                                      turn indicator
-        const fenParts = syncResult.currentFen.split(' ');
-        const turnIndicator = fenParts[1]; // 'w' or 'b'
-        sideToMove = turnIndicator === 'w' ? 'white' : 'black';
-        console.log(`   → FEN turn indicator: ${turnIndicator} (${sideToMove})`);
-      }
-
-      // Final fallback (should rarely be needed)
-      if (!sideToMove) {
-        sideToMove = moveHistory.length % 2 === 0 ? 'white' : 'black';
-        console.log(`   → Using move count fallback: ${sideToMove}`);
-      }
-
-      autoplayColor = sideToMove;
-      console.log(`   🧩 Puzzle detected! Auto-detected playing as: ${autoplayColor}`);
+    // Set color based on user input or auto-detection from board orientation
+    if (color) {
+      // User explicitly specified a color (e.g., 'auto white' or 'auto black')
+      // This restricts the engine to only play when it's that color's turn
+      autoplayColor = color;
+      autoplayAutoDetect = false;
+      console.log(`   → Playing as: ${autoplayColor} (explicit)`);
     } else {
-      // In regular games, use specified color (default to white)
-      autoplayColor = color || 'white';
+      // Auto-detect mode - play whichever side is at the bottom of the board
+      const boardOrientation = await getBoardOrientation();
+
+      if (!boardOrientation) {
+        console.log('   ⚠ Could not detect board orientation');
+        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+        return res.status(400).json({
+          success: false,
+          error: 'Could not detect board orientation',
+          suggestion: 'Specify color explicitly: auto white or auto black'
+        });
+      }
+
+      autoplayColor = boardOrientation;
+      autoplayAutoDetect = true;
+      console.log(`   → Playing as: ${autoplayColor} (auto-detected from board orientation)`);
     }
 
     // Start autoplay
@@ -1626,7 +1692,7 @@ app.post('/autoplay/enable', async (req, res) => {
       success: true,
       message: 'Autoplay enabled',
       color: autoplayColor,
-      isPuzzle: puzzleInfo.isPuzzle,
+      autoDetect: autoplayAutoDetect,
       moveCount: moveHistory.length,
       moveHistory: moveHistory.length > 0 ? moveHistory : undefined,
       synced: syncResult.synced,
